@@ -10,6 +10,7 @@ import shap
 import io
 import zipfile
 import tempfile
+import re
 
 # --- Configurações Iniciais ---
 warnings.simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
@@ -17,7 +18,19 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 plt.style.use('seaborn-v0_8-whitegrid')
 
 
-# --- FUNÇÕES CORE (LÓGICA DO MODELO) ---
+# --- FUNÇÕES CORE (LÓgica DO MODELO) ---
+def sanitize_columns(df):
+    """Limpeza ultra robusta para nomes de colunas."""
+    novas_colunas = []
+    for col in df.columns:
+        clean_col = str(col).strip() # Garante que é string e remove espaços no início/fim
+        clean_col = clean_col.lower() # Converte para minúsculas
+        clean_col = re.sub(r'\s+', '_', clean_col) # Substitui espaços por _
+        clean_col = re.sub(r'[^a-zA-Z0-9_]', '', clean_col) # Remove caracteres especiais
+        clean_col = clean_col.strip('_') # Remove underscores no início/fim
+        novas_colunas.append(clean_col)
+    df.columns = novas_colunas
+    return df
 
 def criar_features_temporais(df, config_geracao):
     """
@@ -31,7 +44,7 @@ def criar_features_temporais(df, config_geracao):
             log_text += msg
             continue
 
-        log_text += f"  -> Processando: '{coluna_base}'\n"
+        log_text += f"   -> Processando: '{coluna_base}'\n"
         for lag in lags:
             feature_name = f'lag{sufixo}_{lag}_meses'
             df_features[feature_name] = df_features[coluna_base].shift(lag)
@@ -40,13 +53,14 @@ def criar_features_temporais(df, config_geracao):
     return df_features, log_text
 
 
-def selecionar_features_com_refinamento(df, features_candidatas, features_fixas, target, datas_split, model_params, progress):
+def selecionar_features_com_refinamento(df_limpo, features_candidatas, features_fixas, target, datas_split, model_params, progress):
     """
     Realiza a seleção de features com uma lógica de refinamento imediato.
+    AGORA RECEBE UM DF JÁ LIMPO.
     """
     log_text = "\n🤖 Iniciando a seleção de features com REFINAMENTO IMEDIATO...\n"
-    treino = df[(df.index >= datas_split['treino_inicio']) & (df.index <= datas_split['treino_fim'])]
-    teste = df[(df.index >= datas_split['teste_inicio']) & (df.index <= datas_split['teste_fim'])]
+    treino = df_limpo[(df_limpo.index >= datas_split['treino_inicio']) & (df_limpo.index <= datas_split['treino_fim'])]
+    teste = df_limpo[(df_limpo.index >= datas_split['teste_inicio']) & (df_limpo.index <= datas_split['teste_fim'])]
     y_train = treino[target]
     y_test = teste[target]
 
@@ -113,177 +127,408 @@ def selecionar_features_com_refinamento(df, features_candidatas, features_fixas,
     
     return final_features, log_text
 
-# --- FUNÇÕES DO GRADIO (CONTROLE DA INTERFACE) ---
+def treinar_e_avaliar(df_limpo, features_finais, target, datas_split, model_params, progress):
+    """
+    Função reutilizável para treinar o modelo final e gerar todos os resultados.
+    AGORA RECEBE UM DF JÁ LIMPO.
+    """
+    log_text = "\n4. Treinando modelo final...\n"
+    
+    treino = df_limpo[df_limpo.index <= datas_split['treino_fim']]
+    teste = df_limpo[df_limpo.index >= datas_split['teste_inicio']]
+    
+    log_text += f"📊 Tamanho do dataset final -> Treino: {len(treino)} linhas | Teste: {len(teste)} linhas.\n"
+    
+    if teste.empty:
+        raise ValueError("O conjunto de teste está vazio. Verifique a data de divisão e o tamanho do seu dataset.")
+    
+    # Ordena as features para garantir consistência total
+    features_finais = sorted(features_finais)
+    
+    X_train, y_train = treino[features_finais], treino[target]
+    X_test, y_test = teste[features_finais], teste[target]
 
-def processar_arquivo(arquivo):
-    if arquivo is None:
-        return gr.update(choices=[], value=None), gr.update(choices=[], value=None), gr.update(choices=[], value=None), gr.update(choices=[], value=None), gr.update(value=None), gr.update(visible=False)
+    log_text += f"\n🕵️  Inspecionando dados de entrada do modelo para garantir consistência...\n"
+    log_text += f"Features Finais para o Modelo ({len(features_finais)}): {features_finais}\n\n"
+    log_text += f"Primeiras 3 linhas de X_train:\n{X_train.head(3).to_string()}\n\n"
+    log_text += f"Últimas 3 linhas de X_train:\n{X_train.tail(3).to_string()}\n\n"
+    log_text += f"Primeiras 3 linhas de X_test:\n{X_test.head(3).to_string()}\n"
+
+    modelo_final = xgb.XGBRegressor(**model_params)
+    modelo_final.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+    
+    progress(0.9, desc="Gerando resultados e gráficos...")
+    y_pred = modelo_final.predict(X_test)
+    
+    metricas = {
+        'Métrica': ['MAPE', 'MAE', 'RMSE', 'R²'],
+        'Valor': [
+            mean_absolute_percentage_error(y_test, y_pred),
+            mean_absolute_error(y_test, y_pred),
+            np.sqrt(mean_squared_error(y_test, y_pred)),
+            r2_score(y_test, y_pred)
+        ]
+    }
+    df_metricas = pd.DataFrame(metricas).round(4)
+    df_resultados = pd.DataFrame({'Real': y_test, 'Previsto': y_pred}, index=y_test.index).round(2)
+    
+    plt.close('all')
+    
+    fig_pred, ax_pred = plt.subplots(figsize=(12, 6)); df_resultados.plot(ax=ax_pred, color=['blue', 'red'], style=['-', '--']); ax_pred.set(title='Comparação Real vs. Previsto', xlabel='Data', ylabel=target); ax_pred.legend(); ax_pred.grid(True)
+    
+    importances = pd.Series(modelo_final.feature_importances_, index=features_finais).sort_values(ascending=False).head(20)
+    fig_imp, ax_imp = plt.subplots(figsize=(10, 8)); importances.plot(kind='barh', ax=ax_imp, color='skyblue'); ax_imp.set(title='Importância das Features (Top 20)', xlabel='Importância'); ax_imp.invert_yaxis(); fig_imp.tight_layout()
+    
+    explainer = shap.TreeExplainer(modelo_final); shap_values = explainer(X_test)
+    
+    plt.figure(); shap.summary_plot(shap_values, X_test, show=False, max_display=20); fig_shap_summary = plt.gcf(); fig_shap_summary.tight_layout()
+    plt.figure(); shap.force_plot(explainer.expected_value, shap_values.values[0,:], X_test.iloc[0,:], matplotlib=True, show=False); fig_shap_force = plt.gcf(); fig_shap_force.tight_layout()
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+        for fig, name in [(fig_pred, "previsao.png"), (fig_imp, "importancia.png"), (fig_shap_summary, "shap_summary.png"), (fig_shap_force, "shap_force.png")]:
+            buf = io.BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); zip_file.writestr(name, buf.getvalue())
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp:
+        tmp.write(zip_buffer.getvalue()); zip_path = tmp.name
+
+    plt.close('all')
+    return log_text, df_resultados, fig_pred, df_metricas, fig_imp, fig_shap_summary, fig_shap_force, gr.update(value=zip_path, visible=True)
+
+# --- FUNÇÕES DE PIPELINE (CONTROLAM OS MODOS) ---
+
+def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_features_orig, colunas_fixas_orig, data_final_treino, lags, progress=gr.Progress(track_tqdm=True)):
     try:
+        progress(0, desc="Carregando dados..."); log_text = "1. Carregando e preparando dados...\n"
         df = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
-        colunas = df.columns.tolist()
+        df = sanitize_columns(df) # Limpeza ROBUSTA dos nomes das colunas
         
-        col_data_candidata = [c for c in colunas if df[c].astype(str).str.match(r'\d{4}-\d{2}-\d{2}').all()]
-        if col_data_candidata:
-            primeira_col_data = col_data_candidata[0]
-            df[primeira_col_data] = pd.to_datetime(df[primeira_col_data])
-            data_min, data_max = df[primeira_col_data].min(), df[primeira_col_data].max()
-            data_split_default = data_min + (data_max - data_min) * 0.8
-            update_datepicker = gr.update(value=data_split_default.strftime('%Y-%m-%d'))
-        else:
-            primeira_col_data = colunas[0]
-            update_datepicker = gr.update(value=None)
-
-        colunas_fixas_choices = colunas + ['mes']
-        return gr.update(choices=colunas, value=primeira_col_data), gr.update(choices=colunas), gr.update(choices=colunas), gr.update(choices=colunas_fixas_choices, value=['mes']), update_datepicker, gr.update(visible=True)
-    except Exception as e:
-        raise gr.Error(f"Erro ao ler o arquivo: {e}")
-
-def executar_pipeline(arquivo, coluna_data, coluna_target, colunas_features, colunas_fixas, data_final_treino, lags, progress=gr.Progress(track_tqdm=True)):
-    if not all([arquivo, coluna_data, coluna_target, colunas_features, data_final_treino]):
-        raise gr.Error("Por favor, preencha todos os campos obrigatórios (Features Fixas é opcional)!")
+        # Sanitiza os nomes das colunas recebidos da UI para corresponder ao df
+        coluna_data = sanitize_columns(pd.DataFrame(columns=[coluna_data_orig])).columns[0]
+        target = sanitize_columns(pd.DataFrame(columns=[target_orig])).columns[0]
+        colunas_features = sanitize_columns(pd.DataFrame(columns=colunas_features_orig)).columns.tolist()
+        colunas_fixas = sanitize_columns(pd.DataFrame(columns=colunas_fixas_orig)).columns.tolist() if colunas_fixas_orig else []
         
-    try:
-        # 1. Carregar Dados
-        progress(0, desc="Carregando dados...")
-        log_text = "1. Carregando e preparando dados...\n"
-        df = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
-        df[coluna_data] = pd.to_datetime(df[coluna_data])
-        df = df.set_index(coluna_data).sort_index()
-        df['mes'] = df.index.month
+        df[coluna_data] = pd.to_datetime(df[coluna_data]); df = df.set_index(coluna_data).sort_index(); 
+        if 'mes' not in colunas_fixas:
+            df['mes'] = df.index.month
         
         data_final_treino_dt = pd.to_datetime(data_final_treino)
-        datas_split = {
-            'treino_inicio': df.index.min(), 'treino_fim': data_final_treino_dt,
-            'teste_inicio': data_final_treino_dt + pd.Timedelta(days=1), 'teste_fim': df.index.max()
-        }
+        datas_split = {'treino_inicio': df.index.min(), 'treino_fim': data_final_treino_dt, 'teste_inicio': data_final_treino_dt + pd.Timedelta(days=1), 'teste_fim': df.index.max()}
         log_text += f"Divisão: Treino até {datas_split['treino_fim'].date()}, Teste a partir de {datas_split['teste_inicio'].date()}\n"
 
-        # 2. Criação de Features
         progress(0.1, desc="Criando Features...")
-        config_geracao = [(col, f'_{col.lower().replace(" ", "_")[:10]}', lags) for col in colunas_features]
-        df_features, log_criacao = criar_features_temporais(df, config_geracao)
-        log_text += log_criacao
+        # <<<<<<< MUDANÇA CRÍTICA: Usa o nome completo da coluna para o sufixo, evitando colisões.
+        config_geracao = [(col, f'_{col}', lags) for col in colunas_features]
+        df_features, log_criacao = criar_features_temporais(df, config_geracao); log_text += log_criacao
+        
+        maior_lag = max(lags) if lags else 0
+        log_text += f"💡 Dica de consistência: Maior lag gerado foi {maior_lag}. Para replicar no modo manual, use este valor em 'simular drop'.\n"
 
-        # 3. Seleção de Features
+        # --- PONTO ÚNICO DE LIMPEZA ---
+        df_limpo = df_features.dropna()
+        log_text += f"ℹ️ Para o processo, {len(df_features) - len(df_limpo)} linhas com dados ausentes foram removidas.\n"
+        
         progress(0.3, desc="Selecionando Features...")
         features_candidatas = [c for c in df_features.columns if c.startswith('lag_')]
         params = {'n_estimators': 500, 'learning_rate': 0.05, 'random_state': 42, 'early_stopping_rounds': 20}
         
-        melhores_features, log_selecao = selecionar_features_com_refinamento(df_features.dropna(), features_candidatas, colunas_fixas, coluna_target, datas_split, params, progress)
-        log_text += log_selecao
+        melhores_features, log_selecao = selecionar_features_com_refinamento(df_limpo, features_candidatas, colunas_fixas, target, datas_split, params, progress); log_text += log_selecao
+        
         features_finais = (colunas_fixas or []) + melhores_features
-        features_selecionadas_md = "### Features Selecionadas:\n" + "\n".join([f"- `{f}`" for f in melhores_features])
+        
+        # Ordena a lista para exibição na UI
+        features_para_md = sorted(melhores_features)
+        features_selecionadas_md = "### Features Selecionadas (Auto):\n" + "\n".join([f"- `{f}`" for f in features_para_md])
 
-        # 4. Treinamento Final
-        progress(0.8, desc="Treinando modelo final...")
-        log_text += "\n4. Treinando modelo final...\n"
-        df_final = df_features.dropna()
-        treino = df_final[df_final.index <= datas_split['treino_fim']]
-        teste = df_final[df_final.index >= datas_split['teste_inicio']]
-        X_train, y_train = treino[features_finais], treino[coluna_target]
-        X_test, y_test = teste[features_finais], teste[coluna_target]
+        log_treino, *results = treinar_e_avaliar(df_limpo, features_finais, target, datas_split, params, progress)
+        log_text += log_treino
 
-        modelo_final = xgb.XGBRegressor(**params)
-        modelo_final.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-        
-        # 5. Previsão, Métricas e Gráficos
-        progress(0.9, desc="Gerando resultados e gráficos...")
-        y_pred = modelo_final.predict(X_test)
-        
-        metricas = {
-            'Métrica': ['MAPE', 'MAE', 'RMSE', 'R²'],
-            'Valor': [
-                mean_absolute_percentage_error(y_test, y_pred),
-                mean_absolute_error(y_test, y_pred),
-                np.sqrt(mean_squared_error(y_test, y_pred)),
-                r2_score(y_test, y_pred)
-            ]
-        }
-        df_metricas = pd.DataFrame(metricas).round(4)
-        df_resultados = pd.DataFrame({'Real': y_test, 'Previsto': y_pred}, index=y_test.index).round(2)
-        
-        plt.close('all') # Limpa figuras anteriores
-        
-        # Gráficos
-        fig_pred, ax_pred = plt.subplots(figsize=(12, 6)); df_resultados.plot(ax=ax_pred, color=['blue', 'red'], style=['-', '--']); ax_pred.set(title='Comparação Real vs. Previsto', xlabel='Data', ylabel=coluna_target); ax_pred.legend(); ax_pred.grid(True)
-        
-        importances = pd.Series(modelo_final.feature_importances_, index=features_finais).sort_values(ascending=False).head(20)
-        fig_imp, ax_imp = plt.subplots(figsize=(10, 8)); importances.plot(kind='barh', ax=ax_imp, color='skyblue'); ax_imp.set(title='Importância das Features (Top 20)', xlabel='Importância'); ax_imp.invert_yaxis()
-        
-        explainer = shap.TreeExplainer(modelo_final); shap_values = explainer(X_test)
-        
-        plt.figure() # Garante uma nova figura para o SHAP Summary
-        shap.summary_plot(shap_values, X_test, show=False, max_display=20); fig_shap_summary = plt.gcf(); fig_shap_summary.tight_layout()
-        
-        plt.figure() # Garante uma nova figura para o SHAP Force
-        shap.force_plot(explainer.expected_value, shap_values.values[0,:], X_test.iloc[0,:], matplotlib=True, show=False); fig_shap_force = plt.gcf(); fig_shap_force.tight_layout()
-
-        # Criar ZIP com gráficos
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
-            for fig, name in [(fig_pred, "previsao.png"), (fig_imp, "importancia.png"), (fig_shap_summary, "shap_summary.png"), (fig_shap_force, "shap_force.png")]:
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight')
-                zip_file.writestr(name, buf.getvalue())
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp:
-            tmp.write(zip_buffer.getvalue())
-            zip_path = tmp.name
-
-        plt.close('all') # Limpa figuras da memória
-        return log_text, df_resultados, fig_pred, df_metricas, features_selecionadas_md, fig_imp, fig_shap_summary, fig_shap_force, gr.update(value=zip_path, visible=True)
+        return log_text, *results, features_selecionadas_md
 
     except Exception as e:
         log_text = f"❌ Ocorreu um erro: {e}\n\n--- Detalhes ---\n{traceback.format_exc()}"
-        return log_text, None, None, None, None, None, None, None, gr.update(visible=False)
+        return log_text, None, None, None, None, None, None, None, None
+
+def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, data_final_treino, features_finais_selecionadas, simular_drop, colunas_configuradas_orig, *lista_de_lags, progress=gr.Progress(track_tqdm=True)):
+    try:
+        progress(0, desc="Carregando dados..."); log_text = "1. Carregando e preparando dados para treino manual...\n"
+        df = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
+        df = sanitize_columns(df) # Limpeza ROBUSTA dos nomes das colunas
+
+        coluna_data = sanitize_columns(pd.DataFrame(columns=[coluna_data_orig])).columns[0]
+        target = sanitize_columns(pd.DataFrame(columns=[target_orig])).columns[0]
+        colunas_configuradas = sanitize_columns(pd.DataFrame(columns=colunas_configuradas_orig)).columns.tolist()
+
+        df[coluna_data] = pd.to_datetime(df[coluna_data]); df = df.set_index(coluna_data).sort_index()
+
+        if any('mes' in f for f in features_finais_selecionadas):
+            df['mes'] = df.index.month
+
+        data_final_treino_dt = pd.to_datetime(data_final_treino)
+        
+        config_geracao = []
+        for i, coluna in enumerate(colunas_configuradas):
+            lags_selecionados = lista_de_lags[i]
+            if lags_selecionados:
+                # <<<<<<< MUDANÇA CRÍTICA: Usa o nome completo da coluna para o sufixo, evitando colisões.
+                sufixo = f'_{coluna}'
+                config_geracao.append((coluna, sufixo, lags_selecionados))
+        df_features, _ = criar_features_temporais(df, config_geracao)
+
+        if simular_drop and simular_drop > 0:
+            df_features[f'__temp_consistency_lag__'] = df[target].shift(int(simular_drop))
+            log_text += f"⚠️ Lag fantasma de {int(simular_drop)} meses criado para consistência.\n"
+
+        # --- PONTO ÚNICO DE LIMPEZA ---
+        df_limpo = df_features.dropna()
+        log_text += f"ℹ️ Para o processo, {len(df_features) - len(df_limpo)} linhas com dados ausentes foram removidas.\n"
+
+        datas_split = {'treino_inicio': df.index.min(), 'treino_fim': data_final_treino_dt, 'teste_inicio': data_final_treino_dt + pd.Timedelta(days=1), 'teste_fim': df.index.max()}
+        log_text += f"Divisão: Treino até {datas_split['treino_fim'].date()}, Teste a partir de {datas_split['teste_inicio'].date()}\n"
+        
+        params = {'n_estimators': 500, 'learning_rate': 0.05, 'random_state': 42, 'early_stopping_rounds': 20}
+        
+        # Ordena a lista para exibição na UI
+        features_para_md = sorted(features_finais_selecionadas)
+        features_selecionadas_md = "### Features Selecionadas (Manual):\n" + "\n".join([f"- `{f}`" for f in features_para_md])
+
+        log_treino, *results = treinar_e_avaliar(df_limpo, features_finais_selecionadas, target, datas_split, params, progress)
+        log_text += log_treino
+
+        return log_text, *results, features_selecionadas_md
+        
+    except Exception as e:
+        log_text = f"❌ Ocorreu um erro: {e}\n\n--- Detalhes ---\n{traceback.format_exc()}"
+        return log_text, None, None, None, None, None, None, None, None
+
+# --- FUNÇÕES DA INTERFACE GRADIO ---
+
+def processar_arquivo(arquivo):
+    if arquivo is None: return [gr.update(visible=False)] * 9
+    try:
+        df = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
+        df_original_cols = df.columns.tolist() # Guarda os nomes originais para a UI
+        df = sanitize_columns(df) 
+        
+        colunas_sanitizadas = df.columns.tolist()
+        
+        # Tenta encontrar uma coluna de data após a sanitização
+        try:
+            col_data_candidata_sanitizada = [c for c in colunas_sanitizadas if df[c].astype(str).str.match(r'\d{4}-\d{2}-\d{2}').all()][0]
+            # Mapeia de volta para o nome original
+            col_data_candidata_original = df_original_cols[colunas_sanitizadas.index(col_data_candidata_sanitizada)]
+        except (IndexError, Exception):
+            col_data_candidata_original = df_original_cols[0]
+
+        data_split_default_str = ""
+        try:
+            df[col_data_candidata_sanitizada] = pd.to_datetime(df[col_data_candidata_sanitizada])
+            data_min, data_max = df[col_data_candidata_sanitizada].min(), df[col_data_candidata_sanitizada].max()
+            data_split_default = data_min + (data_max - data_min) * 0.8
+            data_split_default_str = data_split_default.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+        
+        colunas_fixas_choices = df_original_cols + ['mes']
+        updates = [
+            gr.update(visible=True), # grupo_principal
+            gr.update(choices=df_original_cols, value=col_data_candidata_original), # coluna_data_input
+            gr.update(value=data_split_default_str), # data_final_treino_input
+            gr.update(choices=df_original_cols), # coluna_target_input
+            gr.update(choices=df_original_cols), # colunas_features_auto
+            gr.update(choices=colunas_fixas_choices), # colunas_fixas_auto
+            gr.update(choices=df_original_cols), # colunas_features_manual
+            df_original_cols, colunas_fixas_choices # states
+        ]
+        return updates
+    except Exception as e:
+        raise gr.Error(f"Erro ao ler o arquivo: {e}")
+
+def update_manual_lag_ui(colunas_selecionadas):
+    """
+    Atualiza a UI de configuração de lags no modo manual.
+    Cria um grupo de configuração para cada coluna selecionada.
+    """
+    MAX_COLS = 15 # Define um limite para não sobrecarregar a UI
+    updates = []
+    
+    # Gera updates para as colunas selecionadas
+    for i in range(len(colunas_selecionadas)):
+        if i < MAX_COLS:
+            updates.append(gr.update(visible=True)) # Torna o grupo visível
+            updates.append(gr.update(value=f"**{colunas_selecionadas[i]}**")) # Define o nome da coluna
+
+    # Gera updates para esconder os grupos não utilizados
+    for i in range(len(colunas_selecionadas), MAX_COLS):
+         updates.append(gr.update(visible=False))
+         updates.append(gr.update(value=""))
+
+    return updates
 
 
-# --- CONSTRUÇÃO DA INTERFACE GRADIO ---
+def gerar_features_para_selecao_manual(arquivo, coluna_data_orig, colunas_configuradas_orig, *lista_de_lags):
+    df = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
+    df = sanitize_columns(df)
+
+    coluna_data = sanitize_columns(pd.DataFrame(columns=[coluna_data_orig])).columns[0]
+    colunas_configuradas = sanitize_columns(pd.DataFrame(columns=colunas_configuradas_orig)).columns.tolist()
+    
+    df[coluna_data] = pd.to_datetime(df[coluna_data]); df = df.set_index(coluna_data).sort_index(); 
+    
+    df['mes'] = df.index.month # Gera 'mes' para que possa ser selecionada
+    
+    config_geracao = []
+    for i, coluna in enumerate(colunas_configuradas):
+        lags_selecionados = lista_de_lags[i]
+        if lags_selecionados:
+            # <<<<<<< MUDANÇA CRÍTICA: Usa o nome completo da coluna para o sufixo, evitando colisões.
+            sufixo = f'_{coluna}'
+            config_geracao.append((coluna, sufixo, lags_selecionados))
+
+    df_features, _ = criar_features_temporais(df, config_geracao)
+    
+    features_disponiveis = sorted([c for c in df_features.columns if c in df.columns or c.startswith('lag_') or c == 'mes'])
+    
+    return gr.update(visible=True), gr.update(choices=features_disponiveis, value=features_disponiveis), features_disponiveis
+
+
+# --- CONSTRUÇÃO DA INTERFACE ---
 with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais") as demo:
     gr.Markdown("# 🤖 AutoML para Séries Temporais com Feature Selection Pro")
-    gr.Markdown("Faça o upload do seu dataset, configure as opções e rode um pipeline completo de modelagem com análise de features!")
+    gr.Markdown("Faça o upload, configure o modo (automático ou manual) e rode um pipeline completo de modelagem!")
+    
+    # Estados para armazenar listas de choices para os botões "Selecionar Tudo"
+    colunas_features_state = gr.State([])
+    colunas_fixas_state = gr.State([])
+    features_manuais_state = gr.State([])
 
     with gr.Row():
-        with gr.Column(scale=1):
-            gr.Markdown("## 1. Configurações")
-            arquivo_input = gr.File(label="Selecione seu arquivo (.csv ou .xlsx)")
-            
-            with gr.Group(visible=False) as grupo_config:
-                coluna_data_input = gr.Dropdown(label="Coluna de data")
-                data_final_treino_input = gr.Textbox(label="Data final do treino (AAAA-MM-DD)", placeholder="Ex: 2023-12-31")
-                coluna_target_input = gr.Dropdown(label="Variável TARGET (a prever)")
-                colunas_features_input = gr.CheckboxGroup(label="Colunas para gerar features (lags)")
-                colunas_fixas_input = gr.CheckboxGroup(label="Features FIXAS (opcional)")
-                lags_input = gr.CheckboxGroup(label="Lags (meses)", choices=list(range(1, 13)), value=[6, 12])
-                run_button = gr.Button("🚀 Executar Pipeline!", variant="primary")
+        arquivo_input = gr.File(label="Selecione seu arquivo (.csv ou .xlsx)", scale=1)
+    
+    with gr.Group(visible=False) as grupo_principal:
+        with gr.Row():
+            coluna_data_input = gr.Dropdown(label="Coluna de data")
+            data_final_treino_input = gr.Textbox(label="Data final do treino (AAAA-MM-DD)", placeholder="Ex: 2023-12-31")
+            coluna_target_input = gr.Dropdown(label="Variável TARGET (a prever)")
 
-        with gr.Column(scale=2):
-            gr.Markdown("## 2. Resultados")
-            log_output = gr.Textbox(label="Log de Execução", lines=8, interactive=False)
-            with gr.Row():
-                metricas_output = gr.DataFrame(label="Métricas de Performance", headers=['Métrica', 'Valor'])
-                features_selecionadas_output = gr.Markdown(label="Features Selecionadas")
-            download_output = gr.File(label="Download dos Gráficos (.zip)", visible=False)
+        with gr.Tabs():
+            with gr.TabItem("AutoML com Seleção de Features"):
+                with gr.Row():
+                    with gr.Column():
+                        colunas_features_auto = gr.CheckboxGroup(label="Colunas para gerar features (lags)")
+                        with gr.Row():
+                            select_all_btn_feat_auto = gr.Button("Selecionar Todas")
+                            clear_btn_feat_auto = gr.Button("Limpar")
+                    with gr.Column():
+                        lags_auto = gr.CheckboxGroup(label="Lags (meses)", choices=list(range(1, 13)), value=[6, 12])
+                        with gr.Row():
+                            select_all_btn_lags_auto = gr.Button("Selecionar Todos")
+                            clear_btn_lags_auto = gr.Button("Limpar")
+                    with gr.Column():
+                        colunas_fixas_auto = gr.CheckboxGroup(label="Features FIXAS (opcional)")
+                        with gr.Row():
+                            select_all_btn_fixas_auto = gr.Button("Selecionar Todas")
+                            clear_btn_fixas_auto = gr.Button("Limpar")
+                run_button_auto = gr.Button("🚀 Executar Pipeline Automático!", variant="primary")
 
-            with gr.Tabs():
-                with gr.TabItem("📈 Previsão"):
-                    plot_pred_output = gr.Plot(label="Gráfico de Previsão")
-                    dataframe_output = gr.DataFrame(label="Tabela com Previsões")
-                with gr.TabItem("🧠 Análise do Modelo"):
-                    plot_imp_output = gr.Plot(label="Importância das Features (XGBoost)")
-                    plot_shap_summary_output = gr.Plot(label="Análise de Impacto Geral (SHAP Summary)")
-                    plot_shap_force_output = gr.Plot(label="Análise de Previsão Individual (SHAP Force Plot)")
+            with gr.TabItem("Treino Manual Direto"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("**Passo 1: Colunas para gerar features**")
+                        colunas_features_manual = gr.CheckboxGroup()
+                        with gr.Row():
+                            select_all_btn_feat_manual = gr.Button("Selecionar Todas")
+                            clear_btn_feat_manual = gr.Button("Limpar")
+                        
+                        simular_drop_input = gr.Number(label="Para consistência, simular drop de X meses iniciais", value=12)
 
+                    with gr.Column(scale=2):
+                        gr.Markdown("**Passo 2: Lags para cada coluna**")
+                        with gr.Group() as lag_config_container:
+                            lag_configs_ui = []
+                            MAX_COLS_UI = 15
+                            for i in range(MAX_COLS_UI):
+                                with gr.Group(visible=False) as lag_group:
+                                    col_name = gr.Markdown()
+                                    col_lags = gr.CheckboxGroup(choices=list(range(1, 13)), label="Lags", value=[6, 12], interactive=True)
+                                    lag_configs_ui.append({'group': lag_group, 'name': col_name, 'lags': col_lags})
+
+                        generate_features_button = gr.Button("1. Gerar Features com Base na Configuração")
+
+                with gr.Group(visible=False) as manual_select_group:
+                    gr.Markdown("**Passo 3: Selecione exatamente as features que entrarão no modelo.**")
+                    manual_features_checklist = gr.CheckboxGroup(label="Features para o modelo")
+                    with gr.Row():
+                        select_all_btn_manual_final = gr.Button("Selecionar Todas")
+                        clear_btn_manual_final = gr.Button("Limpar")
+                    run_button_manual = gr.Button("🚀 2. Treinar com Features Selecionadas!", variant="primary")
+
+        gr.Markdown("## Resultados")
+        log_output = gr.Textbox(label="Log de Execução", lines=8, interactive=False)
+        with gr.Row():
+            metricas_output = gr.DataFrame(label="Métricas de Performance", headers=['Métrica', 'Valor'])
+            features_selecionadas_output = gr.Markdown(label="Features Selecionadas")
+        download_output = gr.File(label="Download dos Gráficos (.zip)", visible=False)
+
+        with gr.Tabs():
+            with gr.TabItem("📈 Previsão"):
+                plot_pred_output = gr.Plot(label="Gráfico de Previsão")
+                dataframe_output = gr.DataFrame(label="Tabela com Previsões")
+            with gr.TabItem("🧠 Análise do Modelo"):
+                plot_imp_output = gr.Plot(label="Importância das Features (XGBoost)")
+                plot_shap_summary_output = gr.Plot(label="Análise de Impacto Geral (SHAP Summary)")
+                plot_shap_force_output = gr.Plot(label="Análise de Previsão Individual (SHAP Force Plot)")
+
+    # --- Lógica dos Eventos ---
     arquivo_input.upload(
         processar_arquivo,
         [arquivo_input],
-        [coluna_data_input, coluna_target_input, colunas_features_input, colunas_fixas_input, data_final_treino_input, grupo_config]
+        [grupo_principal, coluna_data_input, data_final_treino_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, colunas_features_manual, colunas_features_state, colunas_fixas_state]
     )
     
-    run_button.click(
-        executar_pipeline,
-        [arquivo_input, coluna_data_input, coluna_target_input, colunas_features_input, colunas_fixas_input, data_final_treino_input, lags_input],
-        [log_output, dataframe_output, plot_pred_output, metricas_output, features_selecionadas_output, plot_imp_output, plot_shap_summary_output, plot_shap_force_output, download_output]
+    # Botões "Selecionar/Limpar"
+    select_all_btn_feat_auto.click(lambda x: gr.update(value=x), colunas_features_state, colunas_features_auto)
+    clear_btn_feat_auto.click(lambda: gr.update(value=[]), None, colunas_features_auto)
+    select_all_btn_lags_auto.click(lambda: gr.update(value=list(range(1,13))), None, lags_auto)
+    clear_btn_lags_auto.click(lambda: gr.update(value=[]), None, lags_auto)
+    select_all_btn_fixas_auto.click(lambda x: gr.update(value=x), colunas_fixas_state, colunas_fixas_auto)
+    clear_btn_fixas_auto.click(lambda: gr.update(value=[]), None, colunas_fixas_auto)
+    select_all_btn_feat_manual.click(lambda x: gr.update(value=x), colunas_features_state, colunas_features_manual)
+    clear_btn_feat_manual.click(lambda: gr.update(value=[]), None, colunas_features_manual)
+    select_all_btn_manual_final.click(lambda x: gr.update(value=x), features_manuais_state, manual_features_checklist)
+    clear_btn_manual_final.click(lambda: gr.update(value=[]), None, manual_features_checklist)
+    
+    # Lógica do Modo Manual
+    lag_ui_outputs_flat = []
+    for config in lag_configs_ui:
+        lag_ui_outputs_flat.extend([config['group'], config['name']])
+    
+    all_lag_checkboxes = [config['lags'] for config in lag_configs_ui]
+
+    colunas_features_manual.change(
+        update_manual_lag_ui,
+        [colunas_features_manual],
+        lag_ui_outputs_flat
+    )
+
+    generate_features_button.click(
+        gerar_features_para_selecao_manual,
+        [arquivo_input, coluna_data_input, colunas_features_manual] + all_lag_checkboxes,
+        [manual_select_group, manual_features_checklist, features_manuais_state]
+    )
+
+    run_button_manual.click(
+        executar_pipeline_manual,
+        [arquivo_input, coluna_data_input, coluna_target_input, data_final_treino_input, manual_features_checklist, simular_drop_input, colunas_features_manual] + all_lag_checkboxes,
+        [log_output, dataframe_output, plot_pred_output, metricas_output, plot_imp_output, plot_shap_summary_output, plot_shap_force_output, download_output, features_selecionadas_output]
+    )
+    
+    # Lógica do Modo Automático
+    run_button_auto.click(
+        executar_pipeline_auto,
+        [arquivo_input, coluna_data_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, data_final_treino_input, lags_auto],
+        [log_output, dataframe_output, plot_pred_output, metricas_output, plot_imp_output, plot_shap_summary_output, plot_shap_force_output, download_output, features_selecionadas_output]
     )
 
 if __name__ == "__main__":
