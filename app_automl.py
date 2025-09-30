@@ -17,6 +17,39 @@ warnings.simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
 warnings.simplefilter(action="ignore", category=FutureWarning)
 plt.style.use('seaborn-v0_8-whitegrid')
 
+# --- CSS Personalizado para o tema "Deus do Front-end" ---
+custom_css = """
+/* Botões Laranja Estilizados */
+.orange-button {
+    background: linear-gradient(to right, #FF8C00, #FFA500) !important;
+    color: white !important;
+    border: none !important;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+.orange-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* Estilo "Dark Mode" para Checkboxes, aplicado ao Group */
+.dark-checkbox-group .gradio-checkbox-group-label {
+    color: #FFFFFF !important; /* Cor do label principal, se existir */
+}
+.dark-checkbox-group {
+    background-color: #000000 !important; /* Fundo preto */
+    border: 1px solid #444 !important;
+    border-radius: 8px !important;
+    padding: 10px !important;
+}
+.dark-checkbox-group label span {
+    color: #FFFFFF !important; /* Texto de cada opção */
+}
+.dark-checkbox-group input[type="checkbox"] {
+    border: 1px solid #FFFFFF !important; /* Quadrado branco */
+    accent-color: #FFA500 !important; /* Cor do check quando marcado (laranja) */
+}
+"""
 
 # --- FUNÇÕES CORE (LÓgica DO MODELO) ---
 def sanitize_columns(df):
@@ -394,7 +427,7 @@ def gerar_features_para_selecao_manual(arquivo, coluna_data_orig, colunas_config
 
 
 # --- CONSTRUÇÃO DA INTERFACE ---
-with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais") as demo:
+with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais", css=custom_css) as demo:
     gr.Markdown("# 🤖 AutoML para Séries Temporais com Feature Selection Pro")
     gr.Markdown("Faça o upload, configure o modo (automático ou manual) e rode um pipeline completo de modelagem!")
     
@@ -407,78 +440,84 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais") as d
         arquivo_input = gr.File(label="Selecione seu arquivo (.csv ou .xlsx)", scale=1)
     
     with gr.Group(visible=False) as grupo_principal:
-        with gr.Row():
-            coluna_data_input = gr.Dropdown(label="Coluna de data")
-            data_final_treino_input = gr.Textbox(label="Data final do treino (AAAA-MM-DD)", placeholder="Ex: 2023-12-31")
-            coluna_target_input = gr.Dropdown(label="Variável TARGET (a prever)")
+        with gr.Group():
+            with gr.Row():
+                coluna_data_input = gr.Dropdown(label="Coluna de data")
+                data_final_treino_input = gr.Textbox(label="Data final do treino (AAAA-MM-DD)", placeholder="Ex: 2023-12-31")
+                coluna_target_input = gr.Dropdown(label="Variável TARGET (a prever)")
 
         with gr.Tabs():
             with gr.TabItem("AutoML com Seleção de Features"):
-                with gr.Row():
-                    with gr.Column():
-                        colunas_features_auto = gr.CheckboxGroup(label="Colunas para gerar features (lags)")
-                        with gr.Row():
-                            select_all_btn_feat_auto = gr.Button("Selecionar Todas")
-                            clear_btn_feat_auto = gr.Button("Limpar")
-                    with gr.Column():
-                        lags_auto = gr.CheckboxGroup(label="Lags (meses)", choices=list(range(1, 13)), value=[6, 12])
-                        with gr.Row():
-                            select_all_btn_lags_auto = gr.Button("Selecionar Todos")
-                            clear_btn_lags_auto = gr.Button("Limpar")
-                    with gr.Column():
-                        colunas_fixas_auto = gr.CheckboxGroup(label="Features FIXAS (opcional)")
-                        with gr.Row():
-                            select_all_btn_fixas_auto = gr.Button("Selecionar Todas")
-                            clear_btn_fixas_auto = gr.Button("Limpar")
-                run_button_auto = gr.Button("🚀 Executar Pipeline Automático!", variant="primary")
+                with gr.Group(elem_classes=["dark-checkbox-group"]):
+                    gr.Markdown("### 1. Colunas para gerar features (lags)")
+                    colunas_features_auto = gr.CheckboxGroup()
+                    with gr.Row():
+                        select_all_btn_feat_auto = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
+                        clear_btn_feat_auto = gr.Button("Limpar", elem_classes=["orange-button"])
+                
+                with gr.Group(elem_classes=["dark-checkbox-group"]):
+                    gr.Markdown("### 2. Lags (meses)")
+                    lags_auto = gr.CheckboxGroup(choices=list(range(1, 13)), value=[])
+                    with gr.Row():
+                        select_all_btn_lags_auto = gr.Button("Selecionar Todos", elem_classes=["orange-button"])
+                        clear_btn_lags_auto = gr.Button("Limpar", elem_classes=["orange-button"])
+                
+                with gr.Group(elem_classes=["dark-checkbox-group"]):
+                    gr.Markdown("### 3. Features FIXAS (opcional)")
+                    colunas_fixas_auto = gr.CheckboxGroup()
+                    with gr.Row():
+                        select_all_btn_fixas_auto = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
+                        clear_btn_fixas_auto = gr.Button("Limpar", elem_classes=["orange-button"])
+                
+                gr.Markdown("---")
+                run_button_auto = gr.Button("🚀 Executar Pipeline Automático!", variant="primary", scale=1)
 
             with gr.TabItem("Treino Manual Direto"):
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        gr.Markdown("**Passo 1: Colunas para gerar features**")
-                        colunas_features_manual = gr.CheckboxGroup()
-                        with gr.Row():
-                            select_all_btn_feat_manual = gr.Button("Selecionar Todas")
-                            clear_btn_feat_manual = gr.Button("Limpar")
-                        
-                        simular_drop_input = gr.Number(label="Para consistência, simular drop de X meses iniciais", value=12)
-
-                    with gr.Column(scale=2):
-                        gr.Markdown("**Passo 2: Lags para cada coluna**")
-                        with gr.Group() as lag_config_container:
-                            lag_configs_ui = []
-                            MAX_COLS_UI = 15
-                            for i in range(MAX_COLS_UI):
-                                with gr.Group(visible=False) as lag_group:
-                                    col_name = gr.Markdown()
-                                    col_lags = gr.CheckboxGroup(choices=list(range(1, 13)), label="Lags", value=[6, 12], interactive=True)
-                                    lag_configs_ui.append({'group': lag_group, 'name': col_name, 'lags': col_lags})
-
-                        generate_features_button = gr.Button("1. Gerar Features com Base na Configuração")
-
-                with gr.Group(visible=False) as manual_select_group:
-                    gr.Markdown("**Passo 3: Selecione exatamente as features que entrarão no modelo.**")
-                    manual_features_checklist = gr.CheckboxGroup(label="Features para o modelo")
+                with gr.Group(elem_classes=["dark-checkbox-group"]):
+                    gr.Markdown("### Passo 1: Selecione as colunas para gerar features")
+                    colunas_features_manual = gr.CheckboxGroup()
                     with gr.Row():
-                        select_all_btn_manual_final = gr.Button("Selecionar Todas")
-                        clear_btn_manual_final = gr.Button("Limpar")
-                    run_button_manual = gr.Button("🚀 2. Treinar com Features Selecionadas!", variant="primary")
+                        select_all_btn_feat_manual = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
+                        clear_btn_feat_manual = gr.Button("Limpar", elem_classes=["orange-button"])
+                
+                with gr.Group():
+                    gr.Markdown("### Passo 2: Configure os lags para cada coluna")
+                    lag_configs_ui = []
+                    MAX_COLS_UI = 15
+                    for i in range(MAX_COLS_UI):
+                        with gr.Row(visible=False) as lag_row:
+                            col_name = gr.Markdown()
+                            gr.Markdown("Lags:")
+                            col_lags = gr.CheckboxGroup(choices=list(range(1, 13)), value=[], interactive=True, elem_classes=["dark-checkbox-group"])
+                            lag_configs_ui.append({'group': lag_row, 'name': col_name, 'lags': col_lags})
+                    
+                    simular_drop_input = gr.Number(label="Para consistência, simular drop de X meses iniciais (opcional)", value=12)
+                    generate_features_button = gr.Button("Gerar e Listar Features Disponíveis")
 
-        gr.Markdown("## Resultados")
-        log_output = gr.Textbox(label="Log de Execução", lines=8, interactive=False)
-        with gr.Row():
-            metricas_output = gr.DataFrame(label="Métricas de Performance", headers=['Métrica', 'Valor'])
-            features_selecionadas_output = gr.Markdown(label="Features Selecionadas")
-        download_output = gr.File(label="Download dos Gráficos (.zip)", visible=False)
+                with gr.Group(visible=False, elem_classes=["dark-checkbox-group"]) as manual_select_group:
+                    gr.Markdown("### Passo 3: Selecione as features finais e treine o modelo")
+                    manual_features_checklist = gr.CheckboxGroup()
+                    with gr.Row():
+                        select_all_btn_manual_final = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
+                        clear_btn_manual_final = gr.Button("Limpar", elem_classes=["orange-button"])
+                    run_button_manual = gr.Button("🚀 Treinar com Features Selecionadas!", variant="primary")
+        
+        with gr.Group():
+            gr.Markdown("## Resultados")
+            log_output = gr.Textbox(label="Log de Execução", lines=10, interactive=False)
+            with gr.Row():
+                metricas_output = gr.DataFrame(label="Métricas de Performance", headers=['Métrica', 'Valor'])
+                features_selecionadas_output = gr.Markdown(label="Features Selecionadas")
+            download_output = gr.File(label="Download dos Gráficos (.zip)", visible=False)
 
-        with gr.Tabs():
-            with gr.TabItem("📈 Previsão"):
-                plot_pred_output = gr.Plot(label="Gráfico de Previsão")
-                dataframe_output = gr.DataFrame(label="Tabela com Previsões")
-            with gr.TabItem("🧠 Análise do Modelo"):
-                plot_imp_output = gr.Plot(label="Importância das Features (XGBoost)")
-                plot_shap_summary_output = gr.Plot(label="Análise de Impacto Geral (SHAP Summary)")
-                plot_shap_force_output = gr.Plot(label="Análise de Previsão Individual (SHAP Force Plot)")
+            with gr.Tabs():
+                with gr.TabItem("📈 Previsão"):
+                    plot_pred_output = gr.Plot(label="Gráfico de Previsão")
+                    dataframe_output = gr.DataFrame(label="Tabela com Previsões")
+                with gr.TabItem("🧠 Análise do Modelo"):
+                    plot_imp_output = gr.Plot(label="Importância das Features (XGBoost)")
+                    plot_shap_summary_output = gr.Plot(label="Análise de Impacto Geral (SHAP Summary)")
+                    plot_shap_force_output = gr.Plot(label="Análise de Previsão Individual (SHAP Force Plot)")
 
     # --- Lógica dos Eventos ---
     arquivo_input.upload(
