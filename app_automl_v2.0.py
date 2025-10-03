@@ -56,7 +56,7 @@ custom_css = """
 }
 """
 
-# --- FUNÇÕES CORE (LÓgica DO MODELO) ---
+# --- FUNÇÕES CORE (LÓGICA DO MODELO) ---
 def sanitize_columns(df):
     """Limpeza ultra robusta para nomes de colunas."""
     novas_colunas = []
@@ -98,21 +98,19 @@ def treinar_e_avaliar(df_limpo, features_finais, target, datas_split, model_para
     log_text = "\n4. Treinando modelo final com as melhores features...\n"
     
     treino = df_limpo[df_limpo.index <= datas_split['treino_fim']]
-    teste = df_limpo[df_limpo.index >= datas_split['teste_inicio']]
+    teste = df_limpo[(df_limpo.index >= datas_split['teste_inicio']) & (df_limpo.index <= datas_split['teste_fim'])]
     
     log_text += f"📊 Tamanho do dataset FINAL -> Treino: {len(treino)} linhas | Teste: {len(teste)} linhas.\n"
     
     if teste.empty:
-        raise ValueError("O conjunto de teste está vazio. Verifique a data de divisão e o tamanho do seu dataset.")
+        raise ValueError("O conjunto de teste está vazio. Verifique a divisão e o tamanho do seu dataset.")
     
-    features_finais = sorted(features_finais)
+    features_finais = sorted(list(set(features_finais)))
     
     X_train, y_train = treino[features_finais], treino[target]
     X_test, y_test = teste[features_finais], teste[target]
 
     modelo_final = xgb.XGBRegressor(**model_params)
-    # No treino final, usamos o early stopping com o teste para ter a melhor performance possível,
-    # mas a métrica reportada é a do teste, que é uma avaliação justa.
     modelo_final.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
     
     progress(0.9, desc="Gerando resultados e gráficos...")
@@ -163,7 +161,7 @@ def treinar_e_avaliar(df_limpo, features_finais, target, datas_split, model_para
 
 # --- FUNÇÕES DE PIPELINE ---
 
-def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_features_orig, colunas_fixas_orig, data_final_treino, lags, n_estimators, learning_rate, max_depth, early_stopping_rounds, progress=gr.Progress(track_tqdm=True)):
+def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_features_orig, colunas_fixas_orig, tamanho_previsao_meses, lags, n_estimators, learning_rate, max_depth, early_stopping_rounds, progress=gr.Progress(track_tqdm=True)):
     log_text = ""
     no_update = gr.update()
     
@@ -186,12 +184,23 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         colunas_fixas = sanitize_columns(pd.DataFrame(columns=colunas_fixas_orig)).columns.tolist() if colunas_fixas_orig else []
         
         df[coluna_data] = pd.to_datetime(df[coluna_data]); df = df.set_index(coluna_data).sort_index(); 
-        if 'mes' not in colunas_fixas:
+        if 'mes' not in colunas_fixas and 'mes' in df.columns is False:
             df['mes'] = df.index.month
         
-        data_final_treino_dt = pd.to_datetime(data_final_treino)
-        datas_split = {'treino_inicio': df.index.min(), 'treino_fim': data_final_treino_dt, 'teste_inicio': data_final_treino_dt + pd.Timedelta(days=1), 'teste_fim': df.index.max()}
-        log_text += f"Divisão: Treino até {datas_split['treino_fim'].date()}, Teste a partir de {datas_split['teste_inicio'].date()}\n"
+        # --- NOVA LÓGICA DE DIVISÃO AUTOMÁTICA ---
+        log_text += f"🧠 Definindo divisão: {tamanho_previsao_meses} meses para o conjunto de teste.\n"
+        data_max = df.index.max()
+        teste_fim = data_max
+        teste_inicio = teste_fim - pd.DateOffset(months=tamanho_previsao_meses) + pd.Timedelta(days=1)
+        treino_fim = teste_inicio - pd.Timedelta(days=1)
+        treino_inicio = df.index.min()
+        
+        datas_split = {
+            'treino_inicio': treino_inicio, 'treino_fim': treino_fim, 
+            'teste_inicio': teste_inicio, 'teste_fim': teste_fim
+        }
+        log_text += f"Divisão -> Treino: {treino_inicio.date()} a {treino_fim.date()} | Teste: {teste_inicio.date()} a {teste_fim.date()}\n"
+        # --- FIM DA NOVA LÓGICA ---
         
         progress(0.1, desc="Criando Features...")
         config_geracao = [(col, f'_{col}', lags) for col in colunas_features]
@@ -207,10 +216,9 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         
         treino_completo = df_limpo[df_limpo.index <= datas_split['treino_fim']]
         
-        # --- CORREÇÃO APLICADA AQUI: CRIANDO UM CONJUNTO DE VALIDAÇÃO ---
         log_text += "\n🛡️ Criando conjunto de VALIDAÇÃO para uma seleção de features robusta...\n"
         
-        # Usaremos os últimos 6 meses do treino para validação, garantindo que não "espiamos" o teste.
+        # Usaremos os últimos 6 meses do treino para validação.
         try:
             data_inicio_validacao = datas_split['treino_fim'] - pd.DateOffset(months=5)
             if data_inicio_validacao < treino_completo.index.min():
@@ -222,24 +230,21 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         treino_selecao = treino_completo[treino_completo.index < data_inicio_validacao]
 
         if treino_selecao.empty or validacao.empty:
-            raise ValueError("Não foi possível criar os conjuntos de treino/validação. Verifique se seu período de treino é longo o suficiente (precisa ter mais de 6 meses).")
+            raise ValueError("Não foi possível criar os conjuntos de treino/validação. Verifique se seu período de treino é longo o suficiente (precisa ter mais de 6 meses) ou diminua o tamanho da previsão.")
 
         y_train_selecao = treino_selecao[target]
         y_valid = validacao[target]
 
         log_text += f"📊 Divisão para Seleção -> Treino: {len(treino_selecao)} linhas | Validação: {len(validacao)} linhas.\n"
-        # --- FIM DA CORREÇÃO ---
 
         params = {'n_estimators': int(n_estimators), 'learning_rate': learning_rate, 'max_depth': int(max_depth),
                   'random_state': 42, 'early_stopping_rounds': int(early_stopping_rounds)}
 
-        # Função de avaliação agora usa o conjunto de VALIDAÇÃO, não o de TESTE.
         def calcular_mape(features):
             if not features: return 1.0
             try:
                 X_train_s, X_valid_s = treino_selecao[features], validacao[features]
                 model = xgb.XGBRegressor(**params)
-                # O eval_set agora aponta para a validação!
                 model.fit(X_train_s, y_train_selecao, eval_set=[(X_valid_s, y_valid)], verbose=False)
                 return mean_absolute_percentage_error(y_valid, model.predict(X_valid_s))
             except Exception: return float('inf')
@@ -343,7 +348,7 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Erro\n*Ocorreu um erro durante a execução.*"
 
 
-def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, data_final_treino, features_finais_selecionadas, simular_drop, colunas_configuradas_orig, n_estimators, learning_rate, max_depth, early_stopping_rounds, *lista_de_lags, progress=gr.Progress(track_tqdm=True)):
+def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_previsao_meses, features_finais_selecionadas, simular_drop, colunas_configuradas_orig, n_estimators, learning_rate, max_depth, early_stopping_rounds, *lista_de_lags, progress=gr.Progress(track_tqdm=True)):
     log_text = ""
     no_update = gr.update()
     
@@ -364,10 +369,8 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, data_final_
 
         df[coluna_data] = pd.to_datetime(df[coluna_data]); df = df.set_index(coluna_data).sort_index()
 
-        if any('mes' in f for f in features_finais_selecionadas):
+        if any('mes' in f for f in features_finais_selecionadas) and 'mes' in df.columns is False:
             df['mes'] = df.index.month
-
-        data_final_treino_dt = pd.to_datetime(data_final_treino)
         
         progress(0.2, desc="Criando features...")
         config_geracao = []
@@ -386,8 +389,20 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, data_final_
         df_limpo = df_features.dropna()
         log_text += f"ℹ️ Para o processo, {len(df_features) - len(df_limpo)} linhas com dados ausentes foram removidas.\n"
 
-        datas_split = {'treino_inicio': df.index.min(), 'treino_fim': data_final_treino_dt, 'teste_inicio': data_final_treino_dt + pd.Timedelta(days=1), 'teste_fim': df.index.max()}
-        log_text += f"Divisão: Treino até {datas_split['treino_fim'].date()}, Teste a partir de {datas_split['teste_inicio'].date()}\n"
+        # --- NOVA LÓGICA DE DIVISÃO AUTOMÁTICA (APLICADA AO MANUAL) ---
+        log_text += f"🧠 Definindo divisão: {tamanho_previsao_meses} meses para o conjunto de teste.\n"
+        data_max = df_limpo.index.max() # Usar df_limpo para garantir que a data máxima existe após o dropna
+        teste_fim = data_max
+        teste_inicio = teste_fim - pd.DateOffset(months=tamanho_previsao_meses) + pd.Timedelta(days=1)
+        treino_fim = teste_inicio - pd.Timedelta(days=1)
+        treino_inicio = df_limpo.index.min()
+
+        datas_split = {
+            'treino_inicio': treino_inicio, 'treino_fim': treino_fim, 
+            'teste_inicio': teste_inicio, 'teste_fim': teste_fim
+        }
+        log_text += f"Divisão -> Treino: {treino_inicio.date()} a {treino_fim.date()} | Teste: {teste_inicio.date()} a {teste_fim.date()}\n"
+        # --- FIM DA NOVA LÓGICA ---
         
         params = {
             'n_estimators': int(n_estimators), 'learning_rate': learning_rate, 'max_depth': int(max_depth),
@@ -411,7 +426,7 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, data_final_
 # --- FUNÇÕES DA INTERFACE ---
 
 def processar_arquivo(arquivo):
-    if arquivo is None: return [gr.update(visible=False)] * 10
+    if arquivo is None: return [gr.update(visible=False)] * 9 # Ajustado para 9 saídas
     try:
         df = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
         df_original_cols = df.columns.tolist()
@@ -424,15 +439,6 @@ def processar_arquivo(arquivo):
             col_data_candidata_original = df_original_cols[colunas_sanitizadas.index(col_data_candidata_sanitizada)]
         except (IndexError, Exception):
             col_data_candidata_original = df_original_cols[0]
-
-        data_split_default_str = ""
-        try:
-            df[col_data_candidata_sanitizada] = pd.to_datetime(df[col_data_candidata_sanitizada])
-            data_min, data_max = df[col_data_candidata_sanitizada].min(), df[col_data_candidata_sanitizada].max()
-            data_split_default = data_min + (data_max - data_min) * 0.8
-            data_split_default_str = data_split_default.strftime('%Y-%m-%d')
-        except Exception:
-            pass
         
         colunas_fixas_choices = df_original_cols + ['mes']
         feature_choices = [c for c in df_original_cols if c != col_data_candidata_original]
@@ -440,7 +446,7 @@ def processar_arquivo(arquivo):
         updates = [
             gr.update(visible=True), 
             gr.update(choices=df_original_cols, value=col_data_candidata_original),
-            gr.update(value=data_split_default_str), 
+            # O input de data foi removido, então não precisa de update para ele.
             gr.update(choices=df_original_cols), 
             gr.update(choices=feature_choices),
             gr.update(choices=colunas_fixas_choices), 
@@ -456,14 +462,15 @@ def processar_arquivo(arquivo):
 def update_manual_lag_ui(colunas_selecionadas):
     MAX_COLS = 15
     updates = []
-    for i in range(len(colunas_selecionadas)):
-        if i < MAX_COLS:
-            updates.append(gr.update(visible=True))
-            updates.append(gr.update(value=f"**{colunas_selecionadas[i]}**"))
+    if colunas_selecionadas:
+        for i in range(len(colunas_selecionadas)):
+            if i < MAX_COLS:
+                updates.append(gr.update(visible=True))
+                updates.append(gr.update(value=f"**{colunas_selecionadas[i]}**"))
 
-    for i in range(len(colunas_selecionadas), MAX_COLS):
-        updates.append(gr.update(visible=False))
-        updates.append(gr.update(value=""))
+        for i in range(len(colunas_selecionadas), MAX_COLS):
+            updates.append(gr.update(visible=False))
+            updates.append(gr.update(value=""))
     return updates
 
 
@@ -476,7 +483,8 @@ def gerar_features_para_selecao_manual(arquivo, coluna_data_orig, colunas_config
     
     df[coluna_data] = pd.to_datetime(df[coluna_data]); df = df.set_index(coluna_data).sort_index(); 
     
-    df['mes'] = df.index.month
+    if 'mes' not in df.columns:
+        df['mes'] = df.index.month
     
     config_geracao = []
     for i, coluna in enumerate(colunas_configuradas):
@@ -509,7 +517,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais", css=
         with gr.Group():
             with gr.Row():
                 coluna_data_input = gr.Dropdown(label="Coluna de data")
-                data_final_treino_input = gr.Textbox(label="Data final do treino (AAAA-MM-DD)", placeholder="Ex: 2023-12-31")
+                # --- ALTERAÇÃO DA INTERFACE ---
+                tamanho_previsao_input = gr.Slider(label="Tamanho da Previsão (meses)", minimum=1, maximum=24, value=6, step=1, scale=1)
                 coluna_target_input = gr.Dropdown(label="Variável TARGET (a prever)")
 
         with gr.Accordion("Parâmetros do Modelo (Ajuste Fino)", open=True):
@@ -598,7 +607,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais", css=
     arquivo_input.upload(
         processar_arquivo,
         [arquivo_input],
-        [grupo_principal, coluna_data_input, data_final_treino_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, colunas_features_manual, colunas_features_state, colunas_fixas_state, valid_features_state]
+        [grupo_principal, coluna_data_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, colunas_features_manual, colunas_features_state, colunas_fixas_state, valid_features_state]
     )
     
     def atualizar_colunas_features(lista_colunas_total, data_selecionada):
@@ -642,13 +651,13 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais", css=
     
     run_button_manual.click(
         executar_pipeline_manual,
-        inputs=[arquivo_input, coluna_data_input, coluna_target_input, data_final_treino_input, manual_features_checklist, simular_drop_input, colunas_features_manual, n_estimators_input, learning_rate_input, max_depth_input, early_stopping_input] + all_lag_checkboxes,
+        inputs=[arquivo_input, coluna_data_input, coluna_target_input, tamanho_previsao_input, manual_features_checklist, simular_drop_input, colunas_features_manual, n_estimators_input, learning_rate_input, max_depth_input, early_stopping_input] + all_lag_checkboxes,
         outputs=outputs_list
     )
     
     run_button_auto.click(
         executar_pipeline_auto,
-        inputs=[arquivo_input, coluna_data_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, data_final_treino_input, lags_auto, n_estimators_input, learning_rate_input, max_depth_input, early_stopping_input],
+        inputs=[arquivo_input, coluna_data_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, tamanho_previsao_input, lags_auto, n_estimators_input, learning_rate_input, max_depth_input, early_stopping_input],
         outputs=outputs_list
     )
 
