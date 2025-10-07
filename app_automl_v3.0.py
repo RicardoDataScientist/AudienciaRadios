@@ -213,66 +213,150 @@ def treinar_e_avaliar_cv(df_limpo, features_finais, target, teste_size, model_pa
     except Exception as e:
         log_text += f"\n⚠️ Aviso: Não foi possível gerar os gráficos SHAP. Erro: {e}\n"
         fig_shap_summary, fig_shap_force = None, None
+    
+    return log_text, df_resultados, fig_pred, df_metricas, fig_imp, fig_shap_summary, fig_shap_force, modelo_final
 
+
+def prever_futuro(modelo, df_historico_base, features_finais, target, horizonte, config_geracao_lags, config_temporal, log_text=""):
+    """
+    Prevê o futuro de forma autorregressiva, recriando as features a cada passo.
+    df_historico_base: DataFrame original, com índice de data e colunas originais (antes de qualquer feature).
+    config_geracao_lags: A configuração exata de [ (coluna, sufixo, [lags]), ... ] para criar os lags.
+    """
+    log_text += "\n5. 🔮 Iniciando a previsão de valores futuros...\n"
+    
+    df_com_previsoes = df_historico_base.copy()
+    
+    ultima_data = df_com_previsoes.index.max()
+    datas_futuras = pd.date_range(start=ultima_data + pd.DateOffset(months=1), periods=horizonte, freq='MS')
+    log_text += f"   -> Gerando previsões para {horizonte} meses, de {datas_futuras[0].date()} até {datas_futuras[-1].date()}.\n"
+
+    # Extrai as colunas exógenas para preenchimento (todas as colunas base para lag, exceto o target)
+    colunas_para_lag_base = {cfg[0] for cfg in config_geracao_lags}
+    cols_exogenas = [c for c in colunas_para_lag_base if c != target]
+
+    for data_previsao in datas_futuras:
+        # Estender o dataframe com a nova data
+        df_com_previsoes.loc[data_previsao] = np.nan
+        
+        # Recriar TODAS as features (temporais e de lag) no dataframe estendido
+        df_temp = df_com_previsoes.copy()
+        df_temp, _, _ = adicionar_features_temporais(df_temp, config_temporal, target)
+        
+        # AQUI USAMOS A CONFIGURAÇÃO DE LAGS EXATA QUE FOI PASSADA
+        df_temp, _ = criar_features_de_lag(df_temp, config_geracao_lags)
+
+        # Pegar a última linha (que acabamos de criar) e prever
+        features_para_prever = df_temp[features_finais].iloc[-1:]
+        
+        # Fazer a previsão
+        previsao = modelo.predict(features_para_prever)[0]
+        
+        # Inserir a previsão de volta no dataframe principal no lugar do NaN
+        df_com_previsoes.loc[data_previsao, target] = previsao
+
+        # Preencher outras colunas exógenas com o último valor conhecido
+        if cols_exogenas:
+            df_com_previsoes[cols_exogenas] = df_com_previsoes[cols_exogenas].ffill()
+
+    df_resultado_futuro = df_com_previsoes.loc[datas_futuras]
+    log_text += "--- ✅ Previsão futura concluída ---\n"
+    
+    return df_resultado_futuro, log_text
+
+
+def gerar_graficos_previsao_futura(df_historico_limpo, df_previsoes_futuras, target, df_historico_completo):
+    """
+    Gera os 3 gráficos solicitados para a análise de previsão futura.
+    df_historico_completo: DataFrame com todo o histórico, antes do dropna, para calcular a média.
+    """
+    
+    plt.close('all')
+    
+    # Gráfico 1: Previsão Futura vs. Histórico
+    fig_futuro, ax1 = plt.subplots(figsize=(12, 6))
+    df_historico_limpo[target].plot(ax=ax1, label='Real (Histórico)', color='blue', alpha=0.8)
+    df_previsoes_futuras[target].plot(ax=ax1, label='Previsto (Futuro)', color='red', style='--')
+    ax1.set_title(f'Previsão Futura vs. Dados Históricos para {target.upper()}', fontsize=16, fontweight='bold')
+    ax1.set(xlabel='Data', ylabel=target)
+    ax1.legend(); ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
+    
+    # Gráfico 2: Previsão Futura vs. Média Mensal Histórica
+    fig_futuro_media, ax2 = plt.subplots(figsize=(12, 6))
+    media_mensal_historica = df_historico_completo.groupby(df_historico_completo.index.month)[target].mean()
+    media_para_futuro = df_previsoes_futuras.index.map(lambda data: media_mensal_historica.get(data.month))
+    ax2.plot(df_previsoes_futuras.index, df_previsoes_futuras[target], label='Previsto (Futuro)', color='red')
+    ax2.plot(df_previsoes_futuras.index, media_para_futuro, label='Média Mensal Histórica', color='green', linestyle=':')
+    ax2.set_title(f'Previsão Futura vs. Média Mensal Histórica para {target.upper()}', fontsize=16, fontweight='bold')
+    ax2.set(xlabel='Data', ylabel=target)
+    ax2.legend(); ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+    # Gráfico 3: Real vs. Média Histórica (no passado)
+    fig_real_media, ax3 = plt.subplots(figsize=(12, 6))
+    feature_media_hist = f'media_mensal_historica_{target}'
+    if feature_media_hist in df_historico_limpo.columns:
+        df_historico_limpo[target].plot(ax=ax3, label='Real', color='blue', alpha=0.8)
+        df_historico_limpo[feature_media_hist].plot(ax=ax3, label='Feature "Média Mensal Histórica"', color='green', style=':')
+        ax3.set_title('Comparativo: Real vs. Feature de Média Mensal Histórica', fontsize=16, fontweight='bold')
+        ax3.set(xlabel='Data', ylabel=target)
+        ax3.legend(); ax3.grid(True, which='both', linestyle='--', linewidth=0.5)
+    else:
+        ax3.text(0.5, 0.5, 'Feature "Média Mensal Histórica" não foi criada.\nGráfico indisponível.', 
+                 horizontalalignment='center', verticalalignment='center', transform=ax3.transAxes)
+
+    return fig_futuro, fig_futuro_media, fig_real_media
+
+
+def salvar_resultados_zip(target, df_metricas, features_finais, df_resultados_cv, df_previsoes_futuras, figs_dict):
+    """Salva todos os artefatos em um arquivo zip."""
+    
     file_prefix = f"{target}_"
     
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
-        for fig, name in [(fig_pred, "previsao_cv.png"), (fig_imp, "importancia.png"), (fig_shap_summary, "shap_summary.png"), (fig_shap_force, "shap_force.png")]:
+        for name, fig in figs_dict.items():
             if fig:
                 buf = io.BytesIO()
                 fig.savefig(buf, format='png', bbox_inches='tight')
-                zip_file.writestr(f"{file_prefix}{name}", buf.getvalue())
+                zip_file.writestr(f"{file_prefix}{name}.png", buf.getvalue())
         
-        log_text += "\n📦 Adicionando arquivos extras ao .zip...\n"
         if not df_metricas.empty:
-            zip_file.writestr(f"{file_prefix}metricas.csv", df_metricas.to_csv(index=False).encode('utf-8'))
-            log_text += f"   -> {file_prefix}metricas.csv adicionado.\n"
+            zip_file.writestr(f"{file_prefix}metricas_cv.csv", df_metricas.to_csv(index=False).encode('utf-8'))
         
-        # --- ALTERAÇÃO AQUI: Salvando features em linha única para facilitar Copiar/Colar ---
         if features_finais:
             features_text = ", ".join(features_finais)
             zip_file.writestr(f"{file_prefix}features_selecionadas.txt", features_text.encode('utf-8'))
-            log_text += f"   -> {file_prefix}features_selecionadas.txt adicionado (formato para copiar e colar).\n"
 
-        if not df_resultados.empty:
-            zip_file.writestr(f"{file_prefix}previsoes_completas.csv", df_resultados.to_csv().encode('utf-8'))
-            log_text += f"   -> {file_prefix}previsoes_completas.csv adicionado.\n"
+        if not df_resultados_cv.empty:
+            zip_file.writestr(f"{file_prefix}previsoes_cv.csv", df_resultados_cv.to_csv().encode('utf-8'))
+        
+        if not df_previsoes_futuras.empty:
+            zip_file.writestr(f"{file_prefix}previsoes_futuras.csv", df_previsoes_futuras.to_csv().encode('utf-8'))
 
-    # --- ALTERAÇÃO AQUI: Renomeando o arquivo .zip para um nome amigável ---
     tmp_f = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
     tmp_f.write(zip_buffer.getvalue())
     tmp_f.close()
 
-    dest_path = os.path.join(os.path.dirname(tmp_f.name), f"{target}_resultados.zip")
+    dest_path = os.path.join(os.path.dirname(tmp_f.name), f"{target}_resultados_completos.zip")
     if os.path.exists(dest_path):
         os.remove(dest_path)
     os.rename(tmp_f.name, dest_path)
-    zip_path = dest_path
-
-    plt.close('all')
-    return log_text, df_resultados, fig_pred, df_metricas, fig_imp, fig_shap_summary, fig_shap_force, gr.update(value=zip_path, visible=True, label=f"Download Resultados ({target}.zip)")
-
+    
+    return gr.update(value=dest_path, visible=True, label=f"Download Resultados ({target}.zip)")
 
 # --- FUNÇÕES DE PIPELINE ---
 
 def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_features_orig, colunas_fixas_orig, temporal_features_orig, tamanho_previsao_meses, lags, n_estimators, learning_rate, max_depth, early_stopping_rounds, progress=gr.Progress(track_tqdm=True)):
     log_text = ""
-    no_update = gr.update()
     
-    blank_outputs_para_nao_piscar = (
-        no_update, no_update, no_update, no_update, 
-        no_update, no_update, no_update, no_update,
-        no_update, no_update, no_update
-    )
-
     try:
         progress(0, desc="Carregando dados...")
         log_text += "1. Carregando e preparando dados...\n"
-        yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", []
+        # Yield inicial para limpar a UI e mostrar a primeira mensagem de log
+        yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", [], None, None, None
         
-        df = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
-        df = sanitize_columns(df)
+        df_original = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
+        df = sanitize_columns(df_original.copy())
         
         coluna_data = sanitize_columns(pd.DataFrame(columns=[coluna_data_orig])).columns[0]
         target = sanitize_columns(pd.DataFrame(columns=[target_orig])).columns[0]
@@ -280,14 +364,14 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         colunas_fixas = sanitize_columns(pd.DataFrame(columns=colunas_fixas_orig)).columns.tolist() if colunas_fixas_orig else []
         
         df[coluna_data] = pd.to_datetime(df[coluna_data]); df = df.set_index(coluna_data).sort_index()
+        df_base_para_futuro = df.copy() # Salva o DF limpo antes de criar features
 
         progress(0.05, desc="Criando Features Temporais...")
         df, log_temporal, created_temporal_features = adicionar_features_temporais(df, temporal_features_orig, target)
         log_text += log_temporal
 
-        # Adiciona as features temporais criadas à lista de features fixas
         colunas_fixas.extend(created_temporal_features)
-        colunas_fixas = sorted(list(set(colunas_fixas))) # Remove duplicatas e ordena
+        colunas_fixas = sorted(list(set(colunas_fixas)))
         
         data_final_treino_dt = df.index.max() - pd.DateOffset(months=int(tamanho_previsao_meses))
         datas_split = {'treino_fim': data_final_treino_dt}
@@ -301,9 +385,7 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         log_text += f"ℹ️ DataFrame com features geradas (antes do dropna) tem {len(df_features)} linhas.\n"
         
         progress(0.3, desc="Selecionando Features com CV...")
-        
         treino_completo_com_nans = df_features[df_features.index <= datas_split['treino_fim']]
-        
         log_text += "\n🛡️ Usando Validação Cruzada (TimeSeriesSplit) para seleção de features robusta...\n"
         
         tscv_selection = TimeSeriesSplit(n_splits=3, test_size=int(tamanho_previsao_meses))
@@ -346,21 +428,21 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
             iteration += 1
             log_text += f"\n==================== ITERAÇÃO DE SELEÇÃO {iteration} ====================\n"
             log_text += f"MAPE CV atual: {mape_atual:.5f}\n"
-            yield log_text, *blank_outputs_para_nao_piscar
+            yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", features_atuais, None, None, None
             
             if not features_candidatas:
                 log_text += "Não há mais features candidatas para testar. Finalizando seleção.\n"
                 break
 
             log_text += "\n--- Fase 1: Buscando a melhor feature para ADICIONAR ---\n"
-            yield log_text, *blank_outputs_para_nao_piscar
+            yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", features_atuais, None, None, None
 
             resultados_adicao = {}
             for feature in features_candidatas:
                 mape_teste = calcular_mape_cv(features_atuais + [feature])
                 resultados_adicao[feature] = mape_teste
                 log_text += f"   - Testando adicionar '{feature}': MAPE CV = {mape_teste:.5f}\n"
-                yield log_text, *blank_outputs_para_nao_piscar
+                yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", features_atuais, None, None, None
             
             melhor_nova_feature = min(resultados_adicao, key=resultados_adicao.get)
             melhor_mape_adicao = resultados_adicao[melhor_nova_feature]
@@ -370,12 +452,12 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
                 break
 
             log_text += f"✅ Melhoria encontrada! Adicionando '{melhor_nova_feature}' (MAPE CV cai para {melhor_mape_adicao:.5f}).\n"
-            yield log_text, *blank_outputs_para_nao_piscar
+            yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", features_atuais + [melhor_nova_feature], None, None, None
             features_para_refinar = features_atuais + [melhor_nova_feature]
             mape_para_refinar = melhor_mape_adicao
             
             log_text += "\n--- Fase 2: Iniciando REFINAMENTO (tentando remover features antigas) ---\n"
-            yield log_text, *blank_outputs_para_nao_piscar
+            yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", features_para_refinar, None, None, None
 
             while True:
                 features_removiveis = [f for f in features_para_refinar if f not in (colunas_fixas or []) and f != melhor_nova_feature]
@@ -388,7 +470,7 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
                     mape_teste = calcular_mape_cv([feat for feat in features_para_refinar if feat != f_remover])
                     resultados_remocao[f_remover] = mape_teste
                     log_text += f"   - Testando remover '{f_remover}': MAPE CV = {mape_teste:.5f}\n"
-                    yield log_text, *blank_outputs_para_nao_piscar
+                    yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", features_para_refinar, None, None, None
                 
                 melhor_remocao = min(resultados_remocao, key=resultados_remocao.get)
                 mape_da_melhor_remocao = resultados_remocao[melhor_remocao]
@@ -415,8 +497,7 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
             return md
 
         log_text += f"\n--- ✨ Seleção Concluída! ✨ ---\nMelhor MAPE na VALIDAÇÃO CRUZADA: {mape_atual:.5f}\n"
-        
-        yield log_text, *blank_outputs_para_nao_piscar
+        yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Seleção de Features\n*Aguardando início do processo...*", gr.update(visible=False), "", features_atuais, None, None, None
         
         features_finais = features_atuais
         features_md_final = format_features_md(features_finais)
@@ -426,30 +507,48 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         colunas_finais_treino = features_finais + [target]
         df_limpo = df_features[colunas_finais_treino].dropna()
         log_text += f"ℹ️ Dataset final (após dropna com features selecionadas) tem {len(df_limpo)} linhas.\n"
-
         log_text += "\n\n--- 🚀 Preparando para o treino final com as melhores features! Aguarde... ---\n"
         
-        log_treino_final, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, zip_file = treinar_e_avaliar_cv(df_limpo, features_finais, target, int(tamanho_previsao_meses), params, progress)
+        log_treino_final, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, modelo_final = treinar_e_avaliar_cv(df_limpo, features_finais, target, int(tamanho_previsao_meses), params, progress)
         log_text += log_treino_final
+
+        # --- MÓDULO DE PREVISÃO FUTURA ---
+        config_geracao_futuro = [(col, f'_{col}', lags) for col in colunas_features]
+        df_previsoes_futuras, log_futuro = prever_futuro(modelo_final, df_base_para_futuro, features_finais, target, int(tamanho_previsao_meses), config_geracao_futuro, temporal_features_orig)
+        log_text += log_futuro
+        fig_fut, fig_fut_media, fig_real_media = gerar_graficos_previsao_futura(df_limpo, df_previsoes_futuras, target, df_base_para_futuro)
         
-        yield log_text, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, zip_file, features_md_final, gr.update(visible=True), features_copy_str, features_finais
+        # --- SALVAR RESULTADOS ---
+        figs_para_salvar = {
+            "previsao_cv": fig_pred, "importancia": fig_imp, "shap_summary": fig_shap_sum, 
+            "shap_force": fig_shap_force, "previsao_futura": fig_fut, 
+            "previsao_vs_media_hist": fig_fut_media, "real_vs_media_hist": fig_real_media
+        }
+        zip_file = salvar_resultados_zip(target, df_met, features_finais, df_res, df_previsoes_futuras, figs_para_salvar)
+        
+        yield log_text, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, zip_file, features_md_final, gr.update(visible=True), features_copy_str, features_finais, fig_fut, fig_fut_media, fig_real_media
 
     except Exception as e:
         log_text += f"\n❌ Ocorreu um erro: {e}\n\n--- Detalhes ---\n{traceback.format_exc()}"
-        yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Erro\n*Ocorreu um erro durante a execução.*", gr.update(visible=False), "", []
+        yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Erro\n*Ocorreu um erro durante a execução.*", gr.update(visible=False), "", [], None, None, None
 
 def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_previsao_meses, temporal_features_orig, features_finais_selecionadas, colunas_configuradas_orig, n_estimators, learning_rate, max_depth, early_stopping_rounds, *lista_de_lags, progress=gr.Progress(track_tqdm=True)):
     log_text = ""
-    no_update = gr.update()
-    blank_outputs = (no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update)
+    blank_outputs_for_yield = [None] * 11
 
     try:
-        progress(0, desc="Carregando dados..."); 
+        progress(0, desc="Carregando dados...")
         log_text = "1. Carregando e preparando dados para treino manual...\n"
-        yield log_text, *blank_outputs
         
-        df = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
-        df = sanitize_columns(df)
+        # CORREÇÃO: Prepara a lista de 11 saídas e preenche a mensagem inicial no lugar certo
+        initial_outputs = list(blank_outputs_for_yield)
+        # O componente de markdown é o 9º na lista geral de saídas,
+        # então corresponde ao índice 7 na nossa lista de 11 saídas (já que o log é o primeiro)
+        initial_outputs[7] = "### Features Selecionadas (Manual)\n*Aguardando execução...*"
+        yield log_text, *initial_outputs
+        
+        df_original = pd.read_csv(arquivo.name) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo.name)
+        df = sanitize_columns(df_original.copy())
 
         coluna_data = sanitize_columns(pd.DataFrame(columns=[coluna_data_orig])).columns[0]
         target = sanitize_columns(pd.DataFrame(columns=[target_orig])).columns[0]
@@ -457,6 +556,7 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_pre
         colunas_originais_sanitizadas = df.columns.tolist()
 
         df[coluna_data] = pd.to_datetime(df[coluna_data]); df = df.set_index(coluna_data).sort_index()
+        df_base_para_futuro = df.copy()
 
         progress(0.1, desc="Criando Features Temporais...")
         df, log_temporal, _ = adicionar_features_temporais(df, temporal_features_orig, target)
@@ -464,19 +564,17 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_pre
 
         progress(0.2, desc="Criando features de lag...")
         
-        # --- LÓGICA DE GERAÇÃO DE LAGS REFORÇADA ---
         config_dict = {}
         
-        # 1. Processa a configuração da UI (Passo 3)
+        # Verifica lags selecionados na UI
         for i, coluna in enumerate(colunas_configuradas):
             lags_selecionados = lista_de_lags[i]
             if lags_selecionados:
-                if coluna not in config_dict:
-                    config_dict[coluna] = set()
+                if coluna not in config_dict: config_dict[coluna] = set()
                 config_dict[coluna].update(lags_selecionados)
 
-        # 2. Processa as features coladas/selecionadas (Passo 4) para inferir lags faltantes
         log_text += "⚙️ Verificando features selecionadas para gerar lags necessários...\n"
+        # Infere lags a partir da lista de features finais
         for feature in features_finais_selecionadas:
             if feature.startswith('lag_') and feature.endswith('_meses'):
                 parts = feature.split('_')
@@ -486,15 +584,12 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_pre
                         base_col = "_".join(parts[1:-2])
                         
                         if base_col in colunas_originais_sanitizadas:
-                            if base_col not in config_dict:
-                                config_dict[base_col] = set()
+                            if base_col not in config_dict: config_dict[base_col] = set()
                             if lag not in config_dict[base_col]:
                                 log_text += f"   -> Inferido lag={lag} para a coluna '{base_col}' a partir de '{feature}'.\n"
                                 config_dict[base_col].add(lag)
-                    except (ValueError, IndexError):
-                        continue
+                    except (ValueError, IndexError): continue
 
-        # 3. Constrói a lista final de configuração para geração de lags
         config_geracao = []
         for coluna, lags_set in config_dict.items():
             if lags_set:
@@ -502,7 +597,6 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_pre
 
         df_features, log_criacao = criar_features_de_lag(df, config_geracao)
         log_text += log_criacao
-        # --- FIM DA LÓGICA DE GERAÇÃO ---
 
         log_text += "⚙️ Aplicando filtro de consistência para garantir reprodutibilidade...\n"
         
@@ -529,14 +623,29 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_pre
         features_selecionadas_md = "### Features Selecionadas (Manual):\n" + "\n".join([f"- `{f}`" for f in features_para_md])
         
         progress(0.5, desc="Treinando modelo com CV...")
-        log_treino_final, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, zip_file = treinar_e_avaliar_cv(df_limpo, features_finais_existentes, target, int(tamanho_previsao_meses), params, progress)
+        log_treino_final, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, modelo_final = treinar_e_avaliar_cv(df_limpo, features_finais_existentes, target, int(tamanho_previsao_meses), params, progress)
         log_text += log_treino_final
 
-        yield log_text, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, zip_file, features_selecionadas_md
+        # --- MÓDULO DE PREVISÃO FUTURA ---
+        df_previsoes_futuras, log_futuro = prever_futuro(modelo_final, df_base_para_futuro, features_finais_existentes, target, int(tamanho_previsao_meses), config_geracao, temporal_features_orig)
+        log_text += log_futuro
+        fig_fut, fig_fut_media, fig_real_media = gerar_graficos_previsao_futura(df_limpo, df_previsoes_futuras, target, df_base_para_futuro)
+        
+        # --- SALVAR RESULTADOS ---
+        figs_para_salvar = {
+            "previsao_cv": fig_pred, "importancia": fig_imp, "shap_summary": fig_shap_sum, 
+            "shap_force": fig_shap_force, "previsao_futura": fig_fut, 
+            "previsao_vs_media_hist": fig_fut_media, "real_vs_media_hist": fig_real_media
+        }
+        zip_file = salvar_resultados_zip(target, df_met, features_finais_existentes, df_res, df_previsoes_futuras, figs_para_salvar)
+        
+        yield log_text, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, zip_file, features_selecionadas_md, fig_fut, fig_fut_media, fig_real_media
         
     except Exception as e:
-        log_text += f"❌ Ocorreu um erro: {e}\n\n--- Detalhes ---\n{traceback.format_exc()}"
-        yield log_text, *blank_outputs, "### Erro\n*Ocorreu um erro durante a execução.*"
+        log_text += f"\n❌ Ocorreu um erro: {e}\n\n--- Detalhes ---\n{traceback.format_exc()}"
+        error_outputs = list(blank_outputs_for_yield)
+        error_outputs[7] = "### Erro\n*Ocorreu um erro durante a execução.*"
+        yield log_text, *error_outputs
 
 def processar_arquivo(arquivo):
     if arquivo is None: return [gr.update(visible=False)] * 10
@@ -634,7 +743,7 @@ def reset_all():
     return [
         gr.update(),  # grupo_principal (no-op)
         gr.update(),  # reset_button (no-op)
-        gr.update(),      # arquivo_input (no-op)
+        gr.update(),       # arquivo_input (no-op)
         gr.update(value=None), # reseta valor de coluna_data_input, mantém choices
         gr.update(value=None), # reseta valor de coluna_target_input, mantém choices
         gr.update(value=[]),   # reseta valor de colunas_features_auto, mantém choices
@@ -643,26 +752,29 @@ def reset_all():
         gr.update(value=list(range(1, 13))), # lags_auto
         gr.update(value=["Mês", "Features de Fourier (Anual)", "Média Mensal Histórica (Target)"]), # temporal_features_manual
         gr.update(value=[]),   # reseta valor de colunas_features_manual, mantém choices
-        gr.update(visible=True),         # manual_select_group - Mantem visível por padrão na aba
+        gr.update(visible=True),        # manual_select_group - Mantem visível por padrão na aba
         gr.update(value=""),                 # paste_features_manual_textbox
         gr.update(value=[], choices=[]),   # manual_features_checklist (choices são dinâmicas)
-        "",                                     # log_output
-        None,                                   # metricas_output
-        "",                                     # features_selecionadas_output
-        gr.update(visible=False),         # copy_row
-        "",                                     # features_copy_output
+        "",                                         # log_output
+        None,                                       # metricas_output
+        "",                                         # features_selecionadas_output
+        gr.update(visible=False),        # copy_row
+        "",                                         # features_copy_output
         gr.update(value=None, visible=False), # download_output
-        None,                                   # plot_pred_output
-        None,                                   # dataframe_output
-        None,                                   # plot_imp_output
-        None,                                   # plot_shap_summary_output
-        None,                                   # plot_shap_force_output
+        None,                                       # plot_pred_output
+        None,                                       # dataframe_output
+        None,                                       # plot_imp_output
+        None,                                       # plot_shap_summary_output
+        None,                                       # plot_shap_force_output
+        None,                                       # plot_futuro_output
+        None,                                       # plot_futuro_vs_media_output
+        None,                                       # plot_real_vs_media_output
     ] + lag_ui_updates
 
 # --- CONSTRUÇÃO DA INTERFACE ---
 with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", css=custom_css) as demo:
-    gr.Markdown("# 🤖 AutoML para Séries Temporais com Feature Selection Pro v3")
-    gr.Markdown("Faça o upload, configure o horizonte de previsão, o modo (automático ou manual) e rode um pipeline completo de modelagem com validação cruzada!")
+    gr.Markdown("# 🤖 AutoML para Séries Temporais com Feature Selection Pro v4")
+    gr.Markdown("Faça o upload, configure o horizonte de previsão, o modo (automático ou manual) e rode um pipeline completo de modelagem com validação cruzada e previsão futura!")
     
     colunas_features_state = gr.State([])
     colunas_fixas_state = gr.State([])
@@ -695,30 +807,15 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
                 with gr.Group(elem_classes=["dark-checkbox-group"]):
                     gr.Markdown("### 1. Features Temporais")
                     temporal_features_auto = gr.CheckboxGroup(choices=temporal_features_choices, value=["Mês", "Features de Fourier (Anual)", "Média Mensal Histórica (Target)"])
-                    with gr.Row():
-                        select_all_btn_temp_auto = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
-                        clear_btn_temp_auto = gr.Button("Limpar", elem_classes=["orange-button"])
-                
                 with gr.Group(elem_classes=["dark-checkbox-group"]):
                     gr.Markdown("### 2. Colunas para gerar features (lags)")
                     colunas_features_auto = gr.CheckboxGroup()
-                    with gr.Row():
-                        select_all_btn_feat_auto = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
-                        clear_btn_feat_auto = gr.Button("Limpar", elem_classes=["orange-button"])
-                
                 with gr.Group(elem_classes=["dark-checkbox-group"]):
                     gr.Markdown("### 3. Lags (meses)")
-                    lags_auto = gr.CheckboxGroup(choices=list(range(1, 13)), value=list(range(1, 13)))
-                    with gr.Row():
-                        select_all_btn_lags_auto = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
-                        clear_btn_lags_auto = gr.Button("Limpar", elem_classes=["orange-button"])
-                
+                    lags_auto = gr.CheckboxGroup(choices=list(range(1, 25)), value=list(range(1, 13)))
                 with gr.Group(elem_classes=["dark-checkbox-group"]):
                     gr.Markdown("### 4. Features FIXAS (opcional)")
                     colunas_fixas_auto = gr.CheckboxGroup()
-                    with gr.Row():
-                        select_all_btn_fixas_auto = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
-                        clear_btn_fixas_auto = gr.Button("Limpar", elem_classes=["orange-button"])
                 
                 gr.Markdown("---")
                 run_button_auto = gr.Button("🚀 Executar Pipeline Automático!", variant="primary", scale=1)
@@ -727,16 +824,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
                 with gr.Group(elem_classes=["dark-checkbox-group"]):
                     gr.Markdown("### Passo 1: Selecione as features temporais")
                     temporal_features_manual = gr.CheckboxGroup(choices=temporal_features_choices, value=["Mês", "Features de Fourier (Anual)", "Média Mensal Histórica (Target)"])
-                    with gr.Row():
-                        select_all_btn_temp_manual = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
-                        clear_btn_temp_manual = gr.Button("Limpar", elem_classes=["orange-button"])
                 
                 with gr.Group(elem_classes=["dark-checkbox-group"]):
                     gr.Markdown("### Passo 2: Selecione as colunas para gerar features de LAG (opcional)")
                     colunas_features_manual = gr.CheckboxGroup()
-                    with gr.Row():
-                        select_all_btn_feat_manual = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
-                        clear_btn_feat_manual = gr.Button("Limpar", elem_classes=["orange-button"])
                 
                 with gr.Group():
                     gr.Markdown("### Passo 3: Configure os lags para cada coluna (opcional)")
@@ -746,7 +837,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
                         with gr.Row(visible=False) as lag_row:
                             col_name = gr.Markdown()
                             gr.Markdown("Lags:")
-                            col_lags = gr.CheckboxGroup(choices=list(range(1, 13)), value=[], interactive=True, elem_classes=["dark-checkbox-group"])
+                            col_lags = gr.CheckboxGroup(choices=list(range(1, 25)), value=[], interactive=True, elem_classes=["dark-checkbox-group"])
                             lag_configs_ui.append({'group': lag_row, 'name': col_name, 'lags': col_lags})
                     
                     generate_features_button = gr.Button("Gerar e Listar Features Disponíveis (para selecionar abaixo)")
@@ -768,10 +859,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
                     gr.Markdown("---")
                     gr.Markdown("#### Revise as features que serão usadas no treino:")
                     manual_features_checklist = gr.CheckboxGroup(label="Features para o Modelo")
-                    with gr.Row():
-                        select_all_btn_manual_final = gr.Button("Selecionar Todas", elem_classes=["orange-button"])
-                        clear_btn_manual_final = gr.Button("Limpar", elem_classes=["orange-button"])
-
+                    
                     run_button_manual = gr.Button("🚀 Treinar com Features Selecionadas!", variant="primary")
         
         with gr.Group():
@@ -799,9 +887,17 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
                     plot_imp_output = gr.Plot(label="Importância das Features (XGBoost)")
                     plot_shap_summary_output = gr.Plot(label="Análise de Impacto Geral (SHAP Summary)")
                     plot_shap_force_output = gr.Plot(label="Análise de Previsão Individual (SHAP Force Plot)")
+                with gr.TabItem("🔮 Previsão Futura"):
+                    plot_futuro_output = gr.Plot(label="Previsão Futura vs. Histórico")
+                    plot_futuro_vs_media_output = gr.Plot(label="Previsão Futura vs. Média Mensal Histórica")
+                    plot_real_vs_media_output = gr.Plot(label="Real vs. Média Mensal Histórica")
 
     # --- Lógica dos Eventos ---
-    outputs_list_manual = [log_output, dataframe_output, plot_pred_output, metricas_output, plot_imp_output, plot_shap_summary_output, plot_shap_force_output, download_output, features_selecionadas_output]
+    outputs_list_manual = [
+        log_output, dataframe_output, plot_pred_output, metricas_output, plot_imp_output, 
+        plot_shap_summary_output, plot_shap_force_output, download_output, features_selecionadas_output,
+        plot_futuro_output, plot_futuro_vs_media_output, plot_real_vs_media_output
+    ]
     outputs_list_auto = outputs_list_manual + [copy_row, features_copy_output, auto_features_list_state]
     
     arquivo_input.upload(
@@ -820,23 +916,6 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
         [colunas_features_auto, colunas_features_manual, colunas_fixas_auto, valid_features_state]
     )
     
-    # Botões de Selecionar/Limpar
-    select_all_btn_temp_auto.click(lambda: gr.update(value=temporal_features_choices), None, temporal_features_auto)
-    clear_btn_temp_auto.click(lambda: gr.update(value=[]), None, temporal_features_auto)
-    select_all_btn_temp_manual.click(lambda: gr.update(value=temporal_features_choices), None, temporal_features_manual)
-    clear_btn_temp_manual.click(lambda: gr.update(value=[]), None, temporal_features_manual)
-
-    select_all_btn_feat_auto.click(lambda x: gr.update(value=x), valid_features_state, colunas_features_auto)
-    clear_btn_feat_auto.click(lambda: gr.update(value=[]), None, colunas_features_auto)
-    select_all_btn_lags_auto.click(lambda: gr.update(value=list(range(1,13))), None, lags_auto)
-    clear_btn_lags_auto.click(lambda: gr.update(value=[]), None, lags_auto)
-    select_all_btn_fixas_auto.click(lambda x: gr.update(value=x), valid_features_state, colunas_fixas_auto) # Usa valid_features para não incluir a data
-    clear_btn_fixas_auto.click(lambda: gr.update(value=[]), None, colunas_fixas_auto)
-    select_all_btn_feat_manual.click(lambda x: gr.update(value=x), valid_features_state, colunas_features_manual)
-    clear_btn_feat_manual.click(lambda: gr.update(value=[]), None, colunas_features_manual)
-    select_all_btn_manual_final.click(lambda x: gr.update(value=x), features_manuais_state, manual_features_checklist)
-    clear_btn_manual_final.click(lambda: gr.update(value=[]), None, manual_features_checklist)
-    
     lag_ui_outputs_flat = []
     for config in lag_configs_ui:
         lag_ui_outputs_flat.extend([config['group'], config['name']])
@@ -852,20 +931,13 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
         log_output, metricas_output, features_selecionadas_output,
         copy_row, features_copy_output, download_output,
         plot_pred_output, dataframe_output, plot_imp_output,
-        plot_shap_summary_output, plot_shap_force_output
+        plot_shap_summary_output, plot_shap_force_output,
+        plot_futuro_output, plot_futuro_vs_media_output, plot_real_vs_media_output,
     ] + lag_ui_outputs_flat
 
-    reset_button.click(
-        reset_all,
-        inputs=[],
-        outputs=components_to_reset
-    )
+    reset_button.click(reset_all, inputs=[], outputs=components_to_reset)
 
-    colunas_features_manual.change(
-        update_manual_lag_ui,
-        [colunas_features_manual],
-        lag_ui_outputs_flat
-    )
+    colunas_features_manual.change(update_manual_lag_ui, [colunas_features_manual], lag_ui_outputs_flat)
 
     generate_features_button.click(
         gerar_features_para_selecao_manual,
