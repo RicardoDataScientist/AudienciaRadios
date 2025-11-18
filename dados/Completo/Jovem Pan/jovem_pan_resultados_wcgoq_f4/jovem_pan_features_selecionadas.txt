@@ -1,0 +1,1 @@
+fourier_cos_anual, fourier_sin_anual, lag_zona_vitoria_5_meses, lag_idade_50_3_meses
