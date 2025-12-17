@@ -1,0 +1,35 @@
+/* Botões Laranja Estilizados */
+.orange-button {
+    background: linear-gradient(to right, #FF8C00, #FFA500) !important;
+    color: white !important;
+    border: none !important;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+.orange-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* Estilo "Dark Mode" para Checkboxes */
+.dark-checkbox-group {
+    background-color: #2c2c2c !important;
+    border: 1px solid #444 !important;
+    border-radius: 8px !important;
+    padding: 10px !important;
+}
+.dark-checkbox-group label span {
+    color: #FFFFFF !important; /* Texto de cada opção */
+}
+.dark-checkbox-group input[type="checkbox"] {
+    border: 1px solid #FFFFFF !important;
+    accent-color: #FFA500 !important;
+}
+/* Títulos de Markdown (h3) dentro do grupo */
+.dark-checkbox-group h3 {
+    color: #FFA500 !important; /* Laranja para destacar o título */
+    font-weight: bold;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #444;
+    margin-bottom: 12px;
+}
