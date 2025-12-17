@@ -77,3 +77,23 @@ def criar_features_de_lag(df, config_geracao):
             df_features[feature_name] = df_features[coluna_base].shift(lag)
     log_text += "--- ✅ Criação de features de lag concluída ---\n"
     return df_features, log_text
+
+def criar_features_media_movel(df, config_geracao):
+    """
+    Cria features de média móvel de forma configurável para evitar data leakage.
+    Aplica shift(1) antes de calcular a média móvel para garantir que usamos apenas dados passados.
+    """
+    df_features = df.copy()
+    log_text = "⚙️ Iniciando criação de features de média móvel...\n"
+    for coluna_base, sufixo, janelas in config_geracao:
+        if coluna_base not in df_features.columns:
+            msg = f" ⚠️    Aviso: Coluna '{coluna_base}' para média móvel não encontrada. Pulando.\n"
+            log_text += msg
+            continue
+        log_text += f"    -> Processando médias móveis para: '{coluna_base}'\n"
+        for janela in janelas:
+            feature_name = f'ma{sufixo}_{janela}_meses'
+            # Shift(1) garante que a média móvel no tempo T use dados de T-1, T-2...
+            df_features[feature_name] = df_features[coluna_base].shift(1).rolling(window=janela).mean()
+    log_text += "--- ✅ Criação de features de média móvel concluída ---\n"
+    return df_features, log_text

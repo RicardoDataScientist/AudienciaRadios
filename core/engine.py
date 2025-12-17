@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import shap
 import warnings
-from core.data_utils import adicionar_features_temporais, criar_features_de_lag
+from core.data_utils import adicionar_features_temporais, criar_features_de_lag, criar_features_media_movel
 
 def treinar_modelo_quantilico(X_train, y_train, model_params, quantiles=[0.1, 0.5, 0.9]):
     """
@@ -198,7 +198,7 @@ def treinar_e_avaliar_cv(df_limpo, features_finais, target, min_months_backtest,
     return log_text, df_resultados, fig_pred, df_metricas, fig_imp, fig_shap_summary, fig_shap_force, modelo_final, shap_values, mape_global
 
 
-def prever_futuro(modelo_base_dummy, df_historico_base, features_finais, target, horizonte, config_geracao_lags, config_temporal, model_params, strategy='recursive', prediction_mode='quantile', mape_margin=0.0, log_text=""):
+def prever_futuro(modelo_base_dummy, df_historico_base, features_finais, target, horizonte, config_geracao_lags, config_media_movel, config_temporal, model_params, strategy='recursive', prediction_mode='quantile', mape_margin=0.0, log_text=""):
     """
     Prevê o futuro.
     Se prediction_mode='normal', usa mape_margin para gerar y_lower e y_upper.
@@ -239,6 +239,7 @@ def prever_futuro(modelo_base_dummy, df_historico_base, features_finais, target,
         df_treino_full = df_historico_base.copy()
         df_treino_full, _, _ = adicionar_features_temporais(df_treino_full, config_temporal, target)
         df_treino_full, _ = criar_features_de_lag(df_treino_full, config_geracao_lags)
+        df_treino_full, _ = criar_features_media_movel(df_treino_full, config_media_movel)
         df_treino_full = df_treino_full.dropna(subset=features_finais + [target])
         
         X_full = df_treino_full[features_finais]
@@ -260,6 +261,7 @@ def prever_futuro(modelo_base_dummy, df_historico_base, features_finais, target,
 
             df_temp_feats, _, _ = adicionar_features_temporais(df_temp_loop, config_temporal, target)
             df_temp_feats, _ = criar_features_de_lag(df_temp_feats, config_geracao_lags)
+            df_temp_feats, _ = criar_features_media_movel(df_temp_feats, config_media_movel)
             
             features_step = df_temp_feats.loc[[data_previsao], features_finais]
             all_features_para_prever.append(features_step)
@@ -280,6 +282,7 @@ def prever_futuro(modelo_base_dummy, df_historico_base, features_finais, target,
         df_base_features = df_historico_base.copy()
         df_base_features, _, _ = adicionar_features_temporais(df_base_features, config_temporal, target)
         df_base_features, _ = criar_features_de_lag(df_base_features, config_geracao_lags)
+        df_base_features, _ = criar_features_media_movel(df_base_features, config_media_movel)
         
         for i, data_previsao in enumerate(datas_futuras):
             horizonte_h = i + 1

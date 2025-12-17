@@ -8,7 +8,7 @@ import warnings
 import traceback
 import os
 
-from core.data_utils import sanitize_columns, adicionar_features_temporais, criar_features_de_lag
+from core.data_utils import sanitize_columns, adicionar_features_temporais, criar_features_de_lag, criar_features_media_movel
 from core.engine import treinar_e_avaliar_cv, prever_futuro
 from utils.viz import gerar_grafico_decomposicao, gerar_grafico_sazonalidade_anual, gerar_graficos_previsao_futura, gerar_grafico_consolidado
 from utils.export import salvar_resultados_zip, gerar_arquivo_mint
@@ -23,7 +23,7 @@ with open("styles.css", "r") as f:
 
 # --- FUNÇÕES DE PIPELINE ---
 
-def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_features_orig, colunas_fixas_orig, temporal_features_orig, tamanho_previsao_meses, backtest_size_meses, lags, n_estimators, learning_rate, max_depth, early_stopping_rounds, forecast_strategy, prediction_mode, progress=gr.Progress(track_tqdm=True)):
+def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_features_orig, colunas_fixas_orig, temporal_features_orig, tamanho_previsao_meses, backtest_size_meses, lags, ma_windows, n_estimators, learning_rate, max_depth, early_stopping_rounds, forecast_strategy, prediction_mode, progress=gr.Progress(track_tqdm=True)):
     if not coluna_data_orig or not target_orig:
         raise gr.Error("Por favor, selecione a 'Coluna de data' e a 'Variável TARGET' antes de executar!")
     
@@ -58,10 +58,15 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         datas_split = {'treino_fim': data_final_treino_dt}
         log_text += f"Divisão (Seleção): Treino até {datas_split['treino_fim'].date()}\n"
         
-        progress(0.1, desc="Criando Features de Lag...")
+        progress(0.1, desc="Criando Features de Lag e Médias Móveis...")
         config_geracao = [(col, f'_{col}', lags) for col in colunas_features]
         df_features, log_criacao = criar_features_de_lag(df, config_geracao)
         log_text += log_criacao
+
+        config_ma = [(col, f'_{col}', ma_windows) for col in colunas_features]
+        df_features, log_ma = criar_features_media_movel(df_features, config_ma)
+        log_text += log_ma
+        
         
         log_text += f"ℹ️ DataFrame com features geradas (antes do dropna) tem {len(df_features)} linhas.\n"
         
@@ -97,7 +102,7 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
                 return np.mean(mape_scores)
             except Exception: return float('inf')
 
-        features_candidatas = [c for c in df_features.columns if c.startswith('lag_')]
+        features_candidatas = [c for c in df_features.columns if c.startswith('lag_') or c.startswith('ma_')]
         features_atuais = colunas_fixas.copy()
         mape_atual = calcular_mape_cv(features_atuais)
         
@@ -198,7 +203,8 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         config_geracao_futuro = [(col, f'_{col}', lags) for col in colunas_features]
         
         # Previsão Futura
-        df_previsoes_futuras, log_futuro, df_features_futuras = prever_futuro(modelo_final, df_base_para_futuro, features_finais, target, int(tamanho_previsao_meses), config_geracao_futuro, temporal_features_orig, params, strategy=forecast_strategy, prediction_mode=prediction_mode, mape_margin=mape_final)
+        config_ma_futuro = [(col, f'_{col}', ma_windows) for col in colunas_features]
+        df_previsoes_futuras, log_futuro, df_features_futuras = prever_futuro(modelo_final, df_base_para_futuro, features_finais, target, int(tamanho_previsao_meses), config_geracao_futuro, config_ma_futuro, temporal_features_orig, params, strategy=forecast_strategy, prediction_mode=prediction_mode, mape_margin=mape_final)
         log_text += log_futuro
         
         fig_fut, fig_fut_media, fig_real_media = gerar_graficos_previsao_futura(df_limpo, df_previsoes_futuras, target, df_base_para_futuro)
@@ -230,7 +236,7 @@ def executar_pipeline_auto(arquivo, coluna_data_orig, target_orig, colunas_featu
         log_text += f"\n❌ Ocorreu um erro: {e}\n\n--- Detalhes ---\n{traceback.format_exc()}"
         yield log_text, None, None, None, None, None, None, gr.update(value=None, visible=False), "### Erro\n*Ocorreu um erro durante a execução.*", gr.update(visible=False), "", [], None, None, None, None, None, None, gr.update(value=None, visible=False)
 
-def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_previsao_meses, backtest_size_meses, temporal_features_orig, features_finais_selecionadas, colunas_configuradas_orig, n_estimators, learning_rate, max_depth, early_stopping_rounds, forecast_strategy, prediction_mode, *lista_de_lags, progress=gr.Progress(track_tqdm=True)):
+def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_previsao_meses, backtest_size_meses, temporal_features_orig, features_finais_selecionadas, colunas_configuradas_orig, ma_windows, n_estimators, learning_rate, max_depth, early_stopping_rounds, forecast_strategy, prediction_mode, *lista_de_lags, progress=gr.Progress(track_tqdm=True)):
     if not coluna_data_orig or not target_orig:
         raise gr.Error("Por favor, selecione a 'Coluna de data' e a 'Variável TARGET' antes de executar!")
     if not features_finais_selecionadas:
@@ -316,7 +322,7 @@ def executar_pipeline_manual(arquivo, coluna_data_orig, target_orig, tamanho_pre
         log_treino_final, df_res, fig_pred, df_met, fig_imp, fig_shap_sum, fig_shap_force, modelo_final, shap_values_hist, mape_final = treinar_e_avaliar_cv(df_limpo, features_finais_existentes, target, int(backtest_size_meses), int(tamanho_previsao_meses), prediction_mode, params, progress)
         log_text += log_treino_final
 
-        df_previsoes_futuras, log_futuro, df_features_futuras = prever_futuro(modelo_final, df_base_para_futuro, features_finais_existentes, target, int(tamanho_previsao_meses), config_geracao, temporal_features_orig, params, strategy=forecast_strategy, prediction_mode=prediction_mode, mape_margin=mape_final)
+        df_previsoes_futuras, log_futuro, df_features_futuras = prever_futuro(modelo_final, df_base_para_futuro, features_finais_existentes, target, int(tamanho_previsao_meses), config_geracao, config_ma, temporal_features_orig, params, strategy=forecast_strategy, prediction_mode=prediction_mode, mape_margin=mape_final)
         log_text += log_futuro
         fig_fut, fig_fut_media, fig_real_media = gerar_graficos_previsao_futura(df_limpo, df_previsoes_futuras, target, df_base_para_futuro)
         
@@ -387,7 +393,7 @@ def update_manual_lag_ui(colunas_selecionadas):
         updates.append(gr.update(value=""))
     return updates
 
-def gerar_features_para_selecao_manual(arquivo, coluna_data_orig, target_orig, temporal_features_orig, colunas_configuradas_orig, *lista_de_lags):
+def gerar_features_para_selecao_manual(arquivo, coluna_data_orig, target_orig, temporal_features_orig, colunas_configuradas_orig, ma_windows, *lista_de_lags):
     if not coluna_data_orig or not target_orig:
         raise gr.Error("Selecione a 'Coluna de data' e a 'Variável TARGET' primeiro!")
 
@@ -411,8 +417,12 @@ def gerar_features_para_selecao_manual(arquivo, coluna_data_orig, target_orig, t
 
     df_features, _ = criar_features_de_lag(df, config_geracao)
     
+    config_ma = [(col, f'_{col}', ma_windows) for col in colunas_configuradas]
+    df_features, _ = criar_features_media_movel(df_features, config_ma)
+
     features_de_lag = [c for c in df_features.columns if c.startswith('lag_')]
-    features_disponiveis = sorted(list(set(created_temporal_features + features_de_lag)))
+    features_ma = [c for c in df_features.columns if c.startswith('ma_')]
+    features_disponiveis = sorted(list(set(created_temporal_features + features_de_lag + features_ma)))
     
     return gr.update(), gr.update(choices=features_disponiveis, value=features_disponiveis), features_disponiveis
 
@@ -426,8 +436,8 @@ def reset_all():
     lag_ui_updates = update_manual_lag_ui([])
     return [
         gr.update(), gr.update(), gr.update(), gr.update(value=None), gr.update(value=None), gr.update(value=[]), gr.update(value=[]),
-        gr.update(value=["Mês", "Features de Fourier (Anual)", "Média Mensal Histórica (Target)"]), gr.update(value=list(range(1, 13))),
-        gr.update(value=["Mês", "Features de Fourier (Anual)", "Média Mensal Histórica (Target)"]), gr.update(value=[]),
+        gr.update(value=["Mês", "Features de Fourier (Anual)", "Média Mensal Histórica (Target)"]), gr.update(value=list(range(1, 13))), gr.update(value=[3, 6, 9]),
+        gr.update(value=["Mês", "Features de Fourier (Anual)", "Média Mensal Histórica (Target)"]), gr.update(value=[]), gr.update(value=[3, 6, 9]),
         gr.update(visible=True), gr.update(value=""), gr.update(value=[], choices=[]),
         "", None, "", gr.update(visible=False), "", gr.update(value=None, visible=False), gr.update(value=None, visible=False, label="Download Dados MinT (.xlsx)"),
         None, None, None, None, None, None, None, None, None, None, None,
@@ -495,7 +505,14 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
                         clear_lags_auto = gr.Button("Limpar", scale=1, elem_classes=["orange-button"])
 
                 with gr.Group(elem_classes=["dark-checkbox-group"]):
-                    gr.Markdown("### 4. Features FIXAS (opcional)")
+                    gr.Markdown("### 4. Médias Móveis (meses)")
+                    ma_auto = gr.CheckboxGroup(choices=[3, 6, 9, 12], value=[3, 6, 9])
+                    with gr.Row():
+                        select_all_ma_auto = gr.Button("Selecionar Todos", scale=1, elem_classes=["orange-button"])
+                        clear_ma_auto = gr.Button("Limpar", scale=1, elem_classes=["orange-button"])
+
+                with gr.Group(elem_classes=["dark-checkbox-group"]):
+                    gr.Markdown("### 5. Features FIXAS (opcional)")
                     colunas_fixas_auto = gr.CheckboxGroup()
                     with gr.Row():
                         select_all_fixas_auto = gr.Button("Selecionar Todos", scale=1, elem_classes=["orange-button"])
@@ -519,7 +536,12 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
                         clear_feat_manual = gr.Button("Limpar", scale=1, elem_classes=["orange-button"])
                 
                 with gr.Group():
-                    gr.Markdown("### Passo 3: Configure os lags para cada coluna (opcional)")
+                    gr.Markdown("### Passo 3: Configure os lags para cada coluna (opcional) e Médias Móveis")
+                    
+                    with gr.Group(elem_classes=["dark-checkbox-group"]):
+                        gr.Markdown("#### Médias Móveis (para todas as colunas selecionadas acima)")
+                        ma_manual = gr.CheckboxGroup(choices=[3, 6, 9, 12], value=[3, 6, 9], label="Janelas de Média Móvel")
+
                     lag_configs_ui = []
                     MAX_COLS_UI = 15
                     for i in range(MAX_COLS_UI):
@@ -595,11 +617,11 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
         lag_ui_outputs_flat.extend([config['group'], config['name']])
     all_lag_checkboxes = [config['lags'] for config in lag_configs_ui]
 
-    components_to_reset = [grupo_principal, reset_button, arquivo_input, coluna_data_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, temporal_features_auto, lags_auto, temporal_features_manual, colunas_features_manual, manual_select_group, paste_features_manual_textbox, manual_features_checklist, log_output, metricas_output, features_selecionadas_output, copy_row, features_copy_output, download_output, mint_output_file, plot_pred_output, dataframe_output, plot_imp_output, plot_shap_summary_output, plot_shap_force_output, plot_futuro_output, plot_futuro_vs_media_output, plot_real_vs_media_output, plot_decomp_output, plot_sazonal_output, plot_consolidado_output] + lag_ui_outputs_flat
+    components_to_reset = [grupo_principal, reset_button, arquivo_input, coluna_data_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, temporal_features_auto, lags_auto, ma_auto, temporal_features_manual, colunas_features_manual, ma_manual, manual_select_group, paste_features_manual_textbox, manual_features_checklist, log_output, metricas_output, features_selecionadas_output, copy_row, features_copy_output, download_output, mint_output_file, plot_pred_output, dataframe_output, plot_imp_output, plot_shap_summary_output, plot_shap_force_output, plot_futuro_output, plot_futuro_vs_media_output, plot_real_vs_media_output, plot_decomp_output, plot_sazonal_output, plot_consolidado_output] + lag_ui_outputs_flat
 
     reset_button.click(reset_all, inputs=[], outputs=components_to_reset)
     colunas_features_manual.change(update_manual_lag_ui, [colunas_features_manual], lag_ui_outputs_flat)
-    generate_features_button.click(gerar_features_para_selecao_manual, [arquivo_input, coluna_data_input, coluna_target_input, temporal_features_manual, colunas_features_manual] + all_lag_checkboxes, [manual_select_group, manual_features_checklist, features_manuais_state])
+    generate_features_button.click(gerar_features_para_selecao_manual, [arquivo_input, coluna_data_input, coluna_target_input, temporal_features_manual, colunas_features_manual, ma_manual] + all_lag_checkboxes, [manual_select_group, manual_features_checklist, features_manuais_state])
     apply_pasted_features_button.click(apply_pasted_features_to_checklist, inputs=[paste_features_manual_textbox], outputs=[manual_select_group, manual_features_checklist])
     paste_button_manual.click(lambda features_list: gr.update(value=features_list, choices=features_list), inputs=[auto_features_list_state], outputs=[manual_features_checklist])
 
@@ -614,6 +636,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
     clear_feat_auto.click(clear_fn, None, colunas_features_auto)
     select_all_lags_auto.click(lambda: select_all_fn(list(range(1,13))), None, lags_auto)
     clear_lags_auto.click(clear_fn, None, lags_auto)
+    select_all_ma_auto.click(lambda: select_all_fn([3, 6, 9, 12]), None, ma_auto)
+    clear_ma_auto.click(clear_fn, None, ma_auto)
     select_all_fixas_auto.click(select_all_fn, [valid_features_state], colunas_fixas_auto)
     clear_fixas_auto.click(clear_fn, None, colunas_fixas_auto)
 
@@ -625,8 +649,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="AutoML de Séries Temporais Pro", 
     select_all_final_manual.click(select_all_fn, [features_manuais_state], manual_features_checklist)
     clear_final_manual.click(clear_fn, None, manual_features_checklist)
     
-    run_button_manual.click(executar_pipeline_manual, inputs=[arquivo_input, coluna_data_input, coluna_target_input, tamanho_previsao_input, backtest_size_input, temporal_features_manual, manual_features_checklist, colunas_features_manual, n_estimators_input, learning_rate_input, max_depth_input, early_stopping_input, forecast_strategy_input, prediction_mode_input] + all_lag_checkboxes, outputs=outputs_list_manual)
-    run_button_auto.click(executar_pipeline_auto, inputs=[arquivo_input, coluna_data_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, temporal_features_auto, tamanho_previsao_input, backtest_size_input, lags_auto, n_estimators_input, learning_rate_input, max_depth_input, early_stopping_input, forecast_strategy_input, prediction_mode_input], outputs=outputs_list_auto)
+    run_button_manual.click(executar_pipeline_manual, inputs=[arquivo_input, coluna_data_input, coluna_target_input, tamanho_previsao_input, backtest_size_input, temporal_features_manual, manual_features_checklist, colunas_features_manual, ma_manual, n_estimators_input, learning_rate_input, max_depth_input, early_stopping_input, forecast_strategy_input, prediction_mode_input] + all_lag_checkboxes, outputs=outputs_list_manual)
+    run_button_auto.click(executar_pipeline_auto, inputs=[arquivo_input, coluna_data_input, coluna_target_input, colunas_features_auto, colunas_fixas_auto, temporal_features_auto, tamanho_previsao_input, backtest_size_input, lags_auto, ma_auto, n_estimators_input, learning_rate_input, max_depth_input, early_stopping_input, forecast_strategy_input, prediction_mode_input], outputs=outputs_list_auto)
 
 if __name__ == "__main__":
     demo.launch(debug=True)
